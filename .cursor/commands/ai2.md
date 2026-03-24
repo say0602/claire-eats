@@ -1,1 +1,0 @@
-YOU ARE AI LLM #2. Please review the implementation of AI LLM #1 and improve as you best see fit. Ensure alignment with existing code. If reviewing a plan document, don't create a new separate document for revision. Revise the existing document directly efficiently, preferring improving parts while keeping what's working.
