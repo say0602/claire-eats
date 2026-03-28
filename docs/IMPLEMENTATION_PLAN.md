@@ -237,12 +237,6 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - `npm.cmd run build` -> pass
 - `npm.cmd run test:ci` -> pass
 
-**Phase 1.5A (Steps 1-4) verification snapshot (2026-03-24)**
-
-- `npm.cmd run lint` -> pass
-- `npm.cmd run build` -> pass
-- `npm.cmd run test:ci` -> pass
-
 5. [ ] **UI upgrades**
    - Add `MichelinBadge.tsx` and `ScorePill.tsx`.
    - Add `Score` and `Michelin` columns.
