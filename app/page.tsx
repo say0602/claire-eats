@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RestaurantTable } from "@/components/RestaurantTable";
 import type { SortKey } from "@/components/RestaurantTable";
 import { SearchBar } from "@/components/SearchBar";
+import { getAppProfile } from "@/lib/app-profile";
 import {
   buildMapOpenClickedEvent,
   buildResultsViewClosedEvent,
@@ -63,10 +64,11 @@ function hasErrorPayload(value: unknown): value is { error: { message?: string }
 }
 
 export default function Home() {
+  const appProfile = getAppProfile();
   const [city, setCity] = useState("");
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
   const [warnings, setWarnings] = useState<SearchWarning[]>([]);
-  const [sortKey, setSortKey] = useState<SortKey>("yelp_reviews");
+  const [sortKey, setSortKey] = useState<SortKey>("total_reviews");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchedCity, setSearchedCity] = useState<string | null>(null);
@@ -145,7 +147,7 @@ export default function Home() {
       setWarnings(payload.warnings);
       setSearchedCity(payload.city || trimmedCity);
       setIsGoogleOnly(payload.google_only === true);
-      setSortKey(payload.google_only === true ? "google_reviews" : "yelp_reviews");
+      setSortKey("total_reviews");
       activeResultsRef.current =
         payload.restaurants.length > 0
           ? {
@@ -180,6 +182,10 @@ export default function Home() {
     },
     [sortKey],
   );
+
+  const downloadFilename = searchedCity
+    ? `claire-eats-${searchedCity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "results"}.csv`
+    : "claire-eats-results.csv";
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
@@ -254,8 +260,17 @@ export default function Home() {
         )}
 
         {isLoading && (
-          <div className="rounded border border-zinc-200 bg-white p-4">
-            <p className="mb-3 text-sm font-medium text-zinc-600">Searching for restaurants...</p>
+          <div className="rounded border border-zinc-200 bg-white p-4" role="status" aria-live="polite" aria-busy="true">
+            <div className="mb-2 inline-flex items-center gap-2">
+              <span
+                aria-hidden="true"
+                className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-[#C4342D]"
+              />
+              <p className="text-sm font-medium text-zinc-700">Searching restaurants...</p>
+            </div>
+            <p className="mb-3 text-xs text-zinc-500">
+              Matching Yelp and Google data can take longer while backfill runs.
+            </p>
             <div className="space-y-2">
               {Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="flex gap-3">
@@ -275,6 +290,8 @@ export default function Home() {
             sortKey={sortKey}
             onSortKeyChange={setSortKey}
             isGoogleOnly={isGoogleOnly}
+            downloadFilename={downloadFilename}
+            appProfile={appProfile}
             onMapOpen={handleMapOpen}
           />
         )}

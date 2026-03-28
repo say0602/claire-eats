@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:ci": "vitest run --coverage --passWithNoTests"
+    "test:ci": "vitest run --coverage --passWithNoTests",
+    "precompute:pilot": "node scripts/precompute-cities.mjs"
   },
   "dependencies": {
     "next": "16.2.1",

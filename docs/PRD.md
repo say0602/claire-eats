@@ -6,9 +6,25 @@
 
 ## 1. Overview
 
-Claire Eats is a food research tool for travelers. Enter a city, and the app aggregates restaurant data from Yelp and Google Places, enriches it with Michelin Guide award data, computes a combined quality score, and presents everything in a clean, sortable table for quick comparison.
+Claire Eats is a food research tool for travelers. Enter a city, and the app aggregates restaurant data from Yelp and Google Places, computes a combined quality score, and presents everything in a clean, sortable table for quick comparison.
 
 > **Core value proposition:** Research restaurants for your next trip — fast, structured, and without switching between five different tabs.
+
+### Product profiles (Public vs Private)
+
+Claire Eats supports two runtime profiles in the same codebase:
+
+- **Public profile (`APP_PROFILE=public`)**: compliance-oriented UI.
+  - No CSV export
+  - No combined/weighted score display
+  - No numeric combined review totals display
+  - Uses a **Popularity Rank** (rank-only) presentation for default ordering
+- **Private profile (`APP_PROFILE=private`)**: personal/internal workflow.
+  - CSV export enabled
+  - Combined score enabled (review-count weighted, 0–10)
+  - Total reviews visible and sortable
+
+The public profile is intended for the public website; the private profile is intended for local or access-controlled use.
 
 ---
 
@@ -46,12 +62,16 @@ The following are explicitly out of scope for the initial release.
 
 1. User enters a city name (e.g. "San Francisco")
 2. User clicks Search
-3. System fetches restaurants from Yelp Business Search API
-4. For each Yelp result, system queries Google Places Text Search to enrich data
-5. System looks up Michelin award data from the bundled static dataset (matched by coordinates)
-6. System computes a combined score per restaurant
-7. Results are rendered as a sortable table
-8. User sorts, inspects, and opens Google Maps links to decide
+3. System fetches restaurants from Yelp Business Search API (top 50 by Yelp review count)
+4. System enriches Yelp rows via Google Places Text Search (best-effort)
+5. System fetches Google Places (New) prominent restaurants (up to 60) and appends unique additions after dedupe
+6. Results are rendered as a sortable table
+7. User sorts, inspects, and opens Google Maps links to decide
+
+Profile-specific UI behavior:
+
+- **Public**: default ordering shown as `Popularity Rank` (rank-only), no CSV, no combined score display
+- **Private**: combined score + total reviews visible, CSV export available
 
 ---
 
@@ -73,12 +93,12 @@ The following are explicitly out of scope for the initial release.
 |---|---|
 | `name` | Required |
 | `rating` | Required |
-| `review_count` | Required — default sort key |
+| `review_count` | Required |
 | `price` | Optional ($, $$, $$$, $$$$) |
 | `categories` | Array of cuisine labels |
 | `coordinates` (lat/lng) | Required — used for Michelin matching |
 
-#### Google Places (enrichment layer)
+#### Google Places (enrichment + merged additions)
 
 For each Yelp result, search Google Places using:
 
@@ -93,9 +113,16 @@ For each Yelp result, search Google Places using:
 | `place_id` | Unique identifier |
 | `maps_url` | Direct Google Maps deep-link |
 
-#### Michelin Guide (static dataset)
+Normal mode behavior:
 
-Bundled as a pre-processed JSON file derived from the open-source [ngshiheng/michelin-my-maps](https://github.com/ngshiheng/michelin-my-maps) dataset (~6,500 restaurants, updated annually). Indexed by city at build time for zero-latency lookups.
+- Yelp remains the primary source (top 50 rows).
+- Google Places (New) prominent results (up to 60) are fetched in parallel and deduped against Yelp rows.
+- Unique Google-prominent rows are appended (merged output capped at 80).
+- Yelp backfill is attempted for Google-prominent additions to recover Yelp rating/review_count where possible.
+
+#### Michelin Guide (static dataset, archived for UI)
+
+Bundled as a pre-processed JSON file derived from the open-source [ngshiheng/michelin-my-maps](https://github.com/ngshiheng/michelin-my-maps) dataset (~6,500 restaurants, updated annually). Michelin runtime matching remains in the backend, but Michelin UI is currently archived and not shown in the table.
 
 | Field | Values |
 |---|---|
@@ -127,12 +154,16 @@ Bundled as a pre-processed JSON file derived from the open-source [ngshiheng/mic
 
 ### 5.4 Combined score
 
-A single numeric score that converts Yelp and Google star ratings to a common 10-point scale and averages them with equal weight.
+A single numeric score that converts Yelp and Google star ratings to a common 10-point scale and combines them using review-count weighting.
+
+**Private profile only:** The score is displayed in `APP_PROFILE=private`. Public profile does not display a combined score.
 
 ```
-yelp10   = yelp_rating × 2
-google10 = google_rating × 2
-score    = (yelp10 + google10) / 2      // when both sources present
+yelp10      = yelp_rating × 2
+google10    = google_rating × 2
+yelpWeight  = yelp_review_count
+googleWeight= google_review_count
+score       = (yelp10*yelpWeight + google10*googleWeight) / (yelpWeight + googleWeight)
 ```
 
 The score is absolute (not normalized relative to the result set) and displayed as a **0–10 value** for readability.
@@ -140,7 +171,7 @@ The score is absolute (not normalized relative to the result set) and displayed 
 | Property | Behavior |
 |---|---|
 | Range | 0.0 – 10.0 (displayed to 1 decimal place) |
-| Weighting | Equal: Yelp 50%, Google 50% |
+| Weighting | Review-count weighted (higher review count has more influence) |
 | Missing data | If only one source has real data (rating > 0 and review_count > 0), score uses that source alone |
 | Placeholder zeros | Google-only fallback rows have Yelp rating/reviews = 0; these are treated as missing, not averaged |
 | Michelin signal | Michelin-starred restaurants surface a badge; stars do not affect the numeric score |
@@ -151,11 +182,12 @@ The score is absolute (not normalized relative to the result set) and displayed 
 
 The primary UI surface. All data for a city is presented in a single scrollable, sortable table.
 
+#### Public profile table (compliance-oriented)
+
 | Column | Source | Notes |
 |---|---|---|
-| # | — | Row index by current sort |
-| Restaurant | Yelp | Name |
-| Score | Computed | 0–10 combined score |
+| Popularity Rank | Computed | Rank-only (`1..N`) based on default ordering logic |
+| Restaurant | Yelp / Google | Name |
 | Yelp Rating | Yelp | Star display + numeric |
 | Yelp Reviews | Yelp | Formatted (e.g. 4.2k) |
 | Google Rating | Google | Star display + numeric |
@@ -164,17 +196,46 @@ The primary UI surface. All data for a city is presented in a single scrollable,
 | Cuisine | Yelp | Tag pills |
 | Map | Google | "Open" button → Google Maps deep-link |
 
+Public profile explicitly does **not** show:
+
+- CSV export
+- Combined score
+- Numeric combined review totals (e.g., Yelp+Google)
+
+#### Private profile table (personal/internal)
+
+| Column | Source | Notes |
+|---|---|---|
+| # | — | Row index by current sort |
+| Restaurant | Yelp / Google | Name |
+| Score | Computed | 0–10 combined score |
+| Total Reviews | Computed | Yelp Reviews + Google Reviews |
+| Yelp Rating | Yelp | Star display + numeric |
+| Yelp Reviews | Yelp | Formatted (e.g. 4.2k) |
+| Google Rating | Google | Star display + numeric |
+| Google Reviews | Google | Formatted |
+| Price | Yelp | $–$$$$ |
+| Cuisine | Yelp | Tag pills |
+| Map | Google | "Open" button → Google Maps deep-link |
+
+Additional UX:
+
+- `Download CSV` action exports the currently sorted result list (private profile only).
+- Tooltips on `Score` and `Total Reviews` explain calculation semantics.
+
 ---
 
 ### 5.6 Sorting
 
 | Option | Default? |
 |---|---|
-| Yelp Reviews | Yes (default for normal searches) |
-| Google Reviews | Yes (default for Google-only fallback) |
-| Combined Score | No |
+| Public: Popularity Rank | Yes (default) |
+| Private: Total Reviews | Yes (default) |
+| Private: Combined Score | No |
+| Yelp Reviews | No |
 | Yelp Rating | No |
 | Google Rating | No |
+| Google Reviews | No |
 
 All sortable columns display a sort indicator icon by default to signal interactivity. Yelp-specific sort options are disabled in Google-only fallback mode.
 
@@ -212,7 +273,7 @@ type Restaurant = {
     matched: boolean            // true = coordinate match found
   }
 
-  combined_score: number | null  // 0–10, null if insufficient data
+  combined_score: number | null  // 0–10, review-count weighted; null if insufficient data
 }
 ```
 
@@ -225,8 +286,8 @@ type Restaurant = {
 
 | | |
 |---|---|
-| **In scope** | City search · Yelp API (50 rows by review count) · Google Places Text Search (top-5 candidate matching with location bias) · Table UI · Google Maps link · Sort by Yelp/Google rating/reviews/score · Google-only fallback when Yelp has no coverage |
-| **Out of scope** | Michelin data · combined score · saved lists · login · perfect matching |
+| **In scope** | City search · Yelp API (50 rows by review count) · Google Places Text Search (top-5 candidate matching with location bias) · Google Places (New) prominent list fetch (up to 60) with merged additions after dedupe · Yelp backfill for prominent additions (best-effort) · Table UI · Google Maps link · Sort by Total Reviews/Yelp/Google rating/reviews/score · Google-only fallback when Yelp has no coverage |
+| **Out of scope** | Michelin UI (archived) · saved lists · login · perfect matching |
 | **Success criteria** | A real traveler can use it to research restaurants before a trip |
 
 ---
@@ -234,8 +295,10 @@ type Restaurant = {
 ### Phase 1.5 — Quick wins
 **Target: days after MVP**
 
-- Combined score column (absolute 10-point, equal Yelp/Google weighting)
+- Combined score column (absolute 10-point, review-count weighted)
 - Expanded sort controls (Yelp rating/reviews, Google rating/reviews, score) with visible sort icons
+- Add `Total Reviews` sort and make it default
+- Add public vs private profiles (public removes score/CSV/combined totals; private keeps personal workflow)
 - Review count formatting (4.2k)
 - Loading UX improvements
 - Error handling and fallback states
@@ -250,6 +313,7 @@ type Restaurant = {
 **Target: 2–4 weeks post-MVP**
 
 - Better matching: further tuning of weighted scoring model (name/distance/address), additional candidate evaluation strategies
+- Prominent list quality/perf tuning: optimize merge quality and Yelp backfill hit-rate/latency trade-offs
 - UI enhancements: hover card with full details, cuisine tag styling, price visual improvement, mobile layout
 - Score tuning: Bayesian average option, review-count confidence weighting
 
@@ -259,7 +323,7 @@ type Restaurant = {
 **Target: 6–8 weeks post-MVP**
 
 - Additional data sources: Michelin Bib Gourmand highlights, World's 50 Best, local "top lists" per city
-- User features: saved/favorited restaurants, export to CSV or Notion, shareable list URLs
+- User features: saved/favorited restaurants, export to Notion, shareable list URLs
 - Monetization: affiliate links (OpenTable, Resy), premium filters (dietary, ambiance)
 
 ---
@@ -271,9 +335,9 @@ type Restaurant = {
 | Frontend | Next.js (App Router) + Tailwind CSS | |
 | Backend | Next.js Server Actions or API Routes | Keeps infra minimal |
 | Yelp | Business Search API | Primary restaurant list |
-| Google | Places Text Search + Place Details | Enrichment layer |
+| Google | Places Text Search + Places API (New) Text Search | Enrichment + prominent additions |
 | Michelin | Static JSON (build-time, ngshiheng dataset) | No API call; refreshed annually |
-| Deployment | Vercel | API keys via environment variables |
+| Deployment | Cloudflare | API keys via environment variables |
 
 ### Folder structure
 
@@ -307,7 +371,7 @@ claire-eats/
 | Scenario | Handling |
 |---|---|
 | Google data unavailable | Display dash; row remains in table |
-| No Michelin match found | Leave Michelin column empty (not an error) |
+| No Michelin match found | No user-visible impact (Michelin UI is archived) |
 | Incorrect Michelin coordinate match | Acceptable at MVP; flagged for Phase 2 tuning |
 | Duplicate Yelp results | Permitted at MVP (de-duplication in Phase 2) |
 | Yelp or Google API failure | Fallback UI with error message; partial results if possible. If Yelp has no coverage, Google-only fallback with explicit banner. |
@@ -339,7 +403,7 @@ claire-eats/
 
 ## 12. One-Line Product Definition
 
-> A table-first research tool that combines Yelp, Google, and Michelin data so travelers can decide where to eat — in under 60 seconds.
+> A table-first research tool that combines Yelp and Google signals so travelers can decide where to eat — in under 60 seconds.
 
 ---
 

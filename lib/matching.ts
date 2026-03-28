@@ -59,6 +59,10 @@ function normalizeName(name: string) {
     .trim();
 }
 
+function compactName(name: string) {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function normalizeAddress(address: string) {
   return address
     .toLowerCase()
@@ -95,17 +99,18 @@ function extractStreetNumber(value: string) {
   return match ? match[0].toLowerCase() : null;
 }
 
-function normalizePostalCode(value: string | null | undefined) {
+export function normalizePostalCode(value: string | null | undefined) {
   if (!value) return null;
   const match = value.match(/\d{5}/);
   return match ? match[0] : null;
 }
 
-function getNameSimilarity(a: string, b: string) {
+export function getNameSimilarity(a: string, b: string) {
   const normalizedA = normalizeName(a);
   const normalizedB = normalizeName(b);
   if (!normalizedA || !normalizedB) return 0;
   if (normalizedA === normalizedB) return 1;
+  if (compactName(normalizedA) === compactName(normalizedB)) return 0.95;
   if (normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA)) return 0.9;
 
   const tokensA = tokenSet(normalizedA);
@@ -113,7 +118,7 @@ function getNameSimilarity(a: string, b: string) {
   return overlapRatio(tokensA, tokensB);
 }
 
-function getAddressSimilarity(
+export function getAddressSimilarity(
   yelpAddress: string | null | undefined,
   yelpPostalCode: string | null | undefined,
   googleAddress: string | null | undefined,

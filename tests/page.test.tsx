@@ -3,10 +3,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import Home from "../app/page";
 
 const ORIGINAL_FETCH = global.fetch;
+const ORIGINAL_PUBLIC_APP_PROFILE = process.env.NEXT_PUBLIC_APP_PROFILE;
 
 afterEach(() => {
   vi.restoreAllMocks();
   global.fetch = ORIGINAL_FETCH;
+  if (ORIGINAL_PUBLIC_APP_PROFILE === undefined) {
+    delete process.env.NEXT_PUBLIC_APP_PROFILE;
+  } else {
+    process.env.NEXT_PUBLIC_APP_PROFILE = ORIGINAL_PUBLIC_APP_PROFILE;
+  }
 });
 
 function makeSearchPayload(restaurants: Record<string, unknown>[]) {
@@ -57,16 +63,18 @@ describe("Home page search flow", () => {
     expect(screen.getByLabelText("City")).toHaveValue("San Francisco, CA");
   });
 
-  it("shows search results sorted by Yelp reviews by default", async () => {
+  it("shows search results sorted by total reviews by default", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json(
         makeSearchPayload([
           makeRestaurantFixture("r-low", "Lower Reviews", {
             yelp: { rating: 4.7, review_count: 120, price: "$$", categories: ["Test"], lat: 37.77, lng: -122.42 },
+            google: { rating: 4.9, review_count: 1200, place_id: "r-low", maps_url: "https://maps.google.com/r-low" },
             combined_score: 9.4,
           }),
           makeRestaurantFixture("r-high", "Higher Reviews", {
             yelp: { rating: 4.1, review_count: 600, price: "$$", categories: ["Test"], lat: 37.77, lng: -122.42 },
+            google: { rating: 4.0, review_count: 0, place_id: "r-high", maps_url: "https://maps.google.com/r-high" },
             combined_score: 6.2,
           }),
         ]),
@@ -82,7 +90,111 @@ describe("Home page search flow", () => {
 
     const high = screen.getByText("Higher Reviews");
     const low = screen.getByText("Lower Reviews");
-    expect((high.compareDocumentPosition(low) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
+    expect((low.compareDocumentPosition(high) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
+  });
+
+  it("renders a Download CSV link for current results", async () => {
+    global.fetch = vi.fn(async () =>
+      Response.json(
+        makeSearchPayload([
+          makeRestaurantFixture("r1", "CSV Place", {
+            yelp: { rating: 4.4, review_count: 250, price: "$$", categories: ["Korean"], lat: 37.77, lng: -122.42 },
+            google: { rating: 4.6, review_count: 1000, place_id: "r1", maps_url: "https://maps.google.com/r1" },
+            combined_score: 9.0,
+          }),
+        ]),
+      ),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("CSV Place")).toBeInTheDocument());
+
+    const downloadLink = screen.getByRole("link", { name: "Download CSV" });
+    expect(downloadLink).toHaveAttribute("download", "claire-eats-san-francisco.csv");
+    const href = downloadLink.getAttribute("href") ?? "";
+    expect(href.length).toBeGreaterThan(0);
+    expect(href.startsWith("blob:") || href.startsWith("data:text/csv")).toBe(true);
+  });
+
+  it("hides CSV/score/total-reviews in public profile and shows popularity rank", async () => {
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    global.fetch = vi.fn(async () =>
+      Response.json(
+        makeSearchPayload([
+          makeRestaurantFixture("public-1", "Public Mode Place", {
+            yelp: { rating: 4.4, review_count: 800, price: "$$", categories: ["Korean"], lat: 37.77, lng: -122.42 },
+            google: { rating: 4.6, review_count: 1200, place_id: "public-1", maps_url: "https://maps.google.com/public-1" },
+            combined_score: 9.0,
+          }),
+        ]),
+      ),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Public Mode Place")).toBeInTheDocument());
+
+    expect(screen.queryByRole("link", { name: "Download CSV" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Score")).not.toBeInTheDocument();
+    expect(screen.queryByText("Total Reviews")).not.toBeInTheDocument();
+    expect(screen.getByText("Popularity Rank")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Google Rating" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Google Reviews" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Yelp Rating" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Yelp Reviews" })).toBeDisabled();
+  });
+
+  it("keeps public-mode row order unchanged when clicking disabled sort controls", async () => {
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    global.fetch = vi.fn(async () =>
+      Response.json(
+        makeSearchPayload([
+          makeRestaurantFixture("public-1", "Public Higher Total Reviews", {
+            yelp: { rating: 4.2, review_count: 900, price: "$$", categories: ["Korean"], lat: 37.77, lng: -122.42 },
+            google: {
+              rating: 4.6,
+              review_count: 1200,
+              place_id: "public-1",
+              maps_url: "https://maps.google.com/public-1",
+            },
+            combined_score: null,
+          }),
+          makeRestaurantFixture("public-2", "Public Lower Total Reviews", {
+            yelp: { rating: 4.8, review_count: 10, price: "$$", categories: ["Korean"], lat: 37.77, lng: -122.42 },
+            google: {
+              rating: 4.9,
+              review_count: 20,
+              place_id: "public-2",
+              maps_url: "https://maps.google.com/public-2",
+            },
+            combined_score: null,
+          }),
+        ]),
+      ),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Public Higher Total Reviews")).toBeInTheDocument());
+
+    const beforeFirst = screen.getByText("Public Higher Total Reviews");
+    const beforeSecond = screen.getByText("Public Lower Total Reviews");
+    expect((beforeFirst.compareDocumentPosition(beforeSecond) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
+
+    const disabledGoogleRatingSort = screen.getByRole("button", { name: "Google Rating" });
+    expect(disabledGoogleRatingSort).toBeDisabled();
+    fireEvent.click(disabledGoogleRatingSort);
+
+    const afterFirst = screen.getByText("Public Higher Total Reviews");
+    const afterSecond = screen.getByText("Public Lower Total Reviews");
+    expect((afterFirst.compareDocumentPosition(afterSecond) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
   });
 
   it("shows a clear error on malformed success payloads", async () => {
@@ -172,6 +284,34 @@ describe("Home page search flow", () => {
     await waitFor(() =>
       expect(screen.getByText("Unable to complete search. Please try again.")).toBeInTheDocument(),
     );
+  });
+
+  it("shows loading status while waiting for search response", async () => {
+    global.fetch = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve(
+              Response.json(
+                makeSearchPayload([
+                  makeRestaurantFixture("slow-1", "Slow Result", {
+                    combined_score: 8.1,
+                  }),
+                ]),
+              ),
+            );
+          }, 30);
+        }),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(screen.getByText("Searching restaurants...")).toBeInTheDocument();
+    expect(screen.getByText(/Matching Yelp and Google data can take longer/i)).toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByText("Slow Result")).toBeInTheDocument());
   });
 
   it("allows switching sort key after results load", async () => {
@@ -340,9 +480,46 @@ describe("Home page search flow", () => {
     const row = screen.getByText("Google Fallback Row").closest("tr");
     expect(row).not.toBeNull();
     const cells = row!.querySelectorAll("td");
-    const yelpRatingCell = cells[3];
-    const yelpReviewsCell = cells[4];
-    const priceCell = cells[7];
+    const yelpRatingCell = cells[4];
+    const yelpReviewsCell = cells[5];
+    const priceCell = cells[8];
+    expect(yelpRatingCell.textContent).toBe("-");
+    expect(yelpReviewsCell.textContent).toBe("-");
+    expect(priceCell.textContent).toBe("-");
+  });
+
+  it("shows dash for Yelp fields on merged Google-added rows in normal mode", async () => {
+    global.fetch = vi.fn(async () =>
+      Response.json({
+        city: "San Francisco",
+        warnings: [],
+        restaurants: [
+          makeRestaurantFixture("y1", "Yelp Native Row", {
+            yelp: { rating: 4.4, review_count: 900, price: "$$", categories: ["Seafood"], lat: 37.77, lng: -122.42 },
+            google: { rating: 4.5, review_count: 1200, place_id: "y1-google", maps_url: "https://maps.google.com/y1-google" },
+            combined_score: 8.9,
+          }),
+          makeRestaurantFixture("g-added-1", "Google Added Row", {
+            yelp: { rating: 0, review_count: 0, price: null, categories: ["Korean"], lat: 37.56, lng: 126.97 },
+            google: { rating: 4.6, review_count: 1500, place_id: "g-added-1", maps_url: "https://maps.google.com/g-added-1" },
+            combined_score: 9.2,
+          }),
+        ],
+      }),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Google Added Row")).toBeInTheDocument());
+
+    const row = screen.getByText("Google Added Row").closest("tr");
+    expect(row).not.toBeNull();
+    const cells = row!.querySelectorAll("td");
+    const yelpRatingCell = cells[4];
+    const yelpReviewsCell = cells[5];
+    const priceCell = cells[8];
     expect(yelpRatingCell.textContent).toBe("-");
     expect(yelpReviewsCell.textContent).toBe("-");
     expect(priceCell.textContent).toBe("-");

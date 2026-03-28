@@ -1,7 +1,16 @@
 import { NextResponse } from "next/server";
 import type { Restaurant, SearchResponseFailure, SearchResponseSuccess, SearchWarning, WarningCode } from "@/lib/types";
 import { getServerEnv } from "@/lib/env";
-import { buildMapsUrl, rejectGoogleEnrichment } from "@/lib/matching";
+import { getServerAppProfile } from "@/lib/app-profile";
+import {
+  buildMapsUrl,
+  getAddressSimilarity,
+  getDistanceMeters,
+  getNameSimilarity,
+  hasNameOverlap,
+  normalizePostalCode,
+  rejectGoogleEnrichment,
+} from "@/lib/matching";
 import { matchMichelinForRestaurant } from "@/lib/michelin";
 import { computeCombinedScores } from "@/lib/scoring";
 import { POST as yelpPost } from "@/app/api/yelp/route";
@@ -12,12 +21,35 @@ const GOOGLE_CONCURRENCY = 5;
 const GOOGLE_REQUEST_TIMEOUT_MS = 3000;
 const ENRICHMENT_BUDGET_MS =
   Math.ceil((MAX_GOOGLE_ENRICHMENTS / GOOGLE_CONCURRENCY) * GOOGLE_REQUEST_TIMEOUT_MS) + 1000;
-const DEPLOYED_MAX_GOOGLE_ENRICHMENTS = 48;
-const GOOGLE_FALLBACK_LIMIT = 20;
+const DEPLOYED_MAX_GOOGLE_ENRICHMENTS = 45;
+const MERGED_RESULT_LIMIT = 80;
+const MERGED_DEDUPE_DISTANCE_METERS = 250;
+const GOOGLE_FALLBACK_LIMIT = 50;
 const GOOGLE_FALLBACK_TIMEOUT_MS = 5000;
 const GOOGLE_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json";
+const GOOGLE_PLACES_NEW_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText";
+const YELP_SEARCH_URL = "https://api.yelp.com/v3/businesses/search";
+const GOOGLE_PROMINENT_PAGE_SIZE = 20;
+const GOOGLE_PROMINENT_MAX_PAGES = 3;
+const GOOGLE_PROMINENT_MAX_RESULTS = 60;
+const GOOGLE_PROMINENT_PAGE_TOKEN_DELAY_MS = 2100;
+const GOOGLE_PROMINENT_TOTAL_BUDGET_MS = 12_000;
+const GOOGLE_PLACES_NEW_FIELD_MASK =
+  "places.id,places.displayName,places.rating,places.userRatingCount,places.location,places.formattedAddress,places.types,nextPageToken";
 const YELP_HARD_FAIL_CODES = new Set(["CONFIG_ERROR", "YELP_RATE_LIMITED", "YELP_TIMEOUT"]);
 const GOOGLE_TYPE_SKIP = new Set(["point_of_interest", "establishment", "food", "restaurant"]);
+const YELP_PROMINENT_MATCH_DISTANCE_METERS = 500;
+const YELP_PROMINENT_REQUEST_TIMEOUT_MS = 1200;
+const YELP_PROMINENT_LOOKUP_LIMIT_LOCAL = 30;
+const YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED = 0;
+const YELP_PROMINENT_BACKFILL_DELAY_MS = 120;
+const YELP_RATE_LIMITED_SENTINEL = Symbol("YELP_RATE_LIMITED");
+
+function devLog(...args: unknown[]) {
+  if (process.env.NODE_ENV !== "development") return;
+  // eslint-disable-next-line no-console
+  console.log(...args);
+}
 
 type YelpSeed = {
   id: string;
@@ -35,6 +67,26 @@ type YelpSeed = {
   };
 };
 
+type YelpBusinessSearchResult = {
+  name?: string;
+  rating?: number;
+  review_count?: number;
+  price?: string;
+  categories?: Array<{ title?: string }>;
+  coordinates?: { latitude?: number; longitude?: number };
+  location?: {
+    address1?: string;
+    address2?: string;
+    address3?: string;
+    zip_code?: string;
+    display_address?: string[];
+  };
+};
+
+type YelpBusinessSearchResponse = {
+  businesses?: YelpBusinessSearchResult[];
+};
+
 type GoogleRouteSuccess = {
   ok: true;
   google: Restaurant["google"];
@@ -45,6 +97,12 @@ type GoogleRouteFallback = {
   code: WarningCode;
   message: string;
   google: Restaurant["google"];
+};
+
+type GoogleProminentMetrics = {
+  fetched: number;
+  added: number;
+  deduped: number;
 };
 
 type SearchDiagnostics = {
@@ -60,6 +118,10 @@ type SearchDiagnostics = {
   google_enrichment_failures: Record<string, number>;
   google_match_rate: number | null;
   michelin_match_rate: number | null;
+  google_prominent_fetched: number;
+  google_prominent_added: number;
+  google_prominent_deduped: number;
+  google_prominent_ms: number | null;
   warning_codes: WarningCode[];
 };
 
@@ -104,6 +166,18 @@ function failureEnvelope(
     warnings,
     error: { code, message },
   };
+}
+
+function toProfileRestaurants(restaurants: Restaurant[]) {
+  if (getServerAppProfile() !== "public") return restaurants;
+  return restaurants.map((restaurant) => ({
+    ...restaurant,
+    combined_score: null,
+  }));
+}
+
+function shouldComputeCombinedScore() {
+  return getServerAppProfile() !== "public";
 }
 
 function withTimeout(ms: number) {
@@ -185,6 +259,188 @@ function ratioOrNull(numerator: number, denominator: number) {
   return roundMetric(numerator / denominator);
 }
 
+function toYelpPriceTier(value: string | undefined): Restaurant["yelp"]["price"] {
+  if (value === "$" || value === "$$" || value === "$$$" || value === "$$$$") return value;
+  return null;
+}
+
+function parseYelpAddress(location: YelpBusinessSearchResult["location"]) {
+  const displayAddress = location?.display_address
+    ?.map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(", ");
+  if (displayAddress) return displayAddress;
+
+  const streetAddress = [location?.address1, location?.address2, location?.address3]
+    .filter((line): line is string => typeof line === "string" && line.trim().length > 0)
+    .map((line) => line.trim())
+    .join(" ");
+  return streetAddress || null;
+}
+
+function extractPostalCodeFromAddress(address: string | null | undefined) {
+  return normalizePostalCode(address ?? null);
+}
+
+async function findYelpDataForProminentRestaurant(
+  city: string,
+  restaurant: Restaurant,
+  yelpApiKey: string,
+): Promise<Restaurant["yelp"] | null> {
+  const searchUrl = new URL(YELP_SEARCH_URL);
+  if (Number.isFinite(restaurant.yelp.lat) && Number.isFinite(restaurant.yelp.lng)) {
+    searchUrl.searchParams.set("latitude", String(restaurant.yelp.lat));
+    searchUrl.searchParams.set("longitude", String(restaurant.yelp.lng));
+  } else {
+    searchUrl.searchParams.set("location", city);
+  }
+  searchUrl.searchParams.set("term", restaurant.name);
+  searchUrl.searchParams.set("limit", "10");
+
+  const timeout = withTimeout(YELP_PROMINENT_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(searchUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${yelpApiKey}`,
+        Accept: "application/json",
+      },
+      signal: timeout.signal,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      devLog("[prominent-yelp] lookup failed", {
+        city,
+        name: restaurant.name,
+        status: response.status,
+      });
+      if (response.status === 429) return YELP_RATE_LIMITED_SENTINEL as unknown as null;
+      return null;
+    }
+
+    const payload = (await response.json()) as YelpBusinessSearchResponse;
+    const candidates = (payload.businesses ?? [])
+      .map((business) => {
+        if (typeof business.rating !== "number" || typeof business.review_count !== "number") return null;
+        const nameScore = getNameSimilarity(restaurant.name, business.name ?? "");
+        if (nameScore < 0.35) return null;
+        const lat = business.coordinates?.latitude;
+        const lng = business.coordinates?.longitude;
+        const hasCoords = typeof lat === "number" && typeof lng === "number";
+
+        let distanceMeters: number | null = null;
+        let distanceScore = 0;
+        if (hasCoords) {
+          distanceMeters = getDistanceMeters(
+            { lat: restaurant.yelp.lat, lng: restaurant.yelp.lng },
+            { lat, lng },
+          );
+          if (distanceMeters > YELP_PROMINENT_MATCH_DISTANCE_METERS) return null;
+          distanceScore = 1 - distanceMeters / YELP_PROMINENT_MATCH_DISTANCE_METERS;
+        }
+        const yelpAddress = parseYelpAddress(business.location);
+        const addressScore = getAddressSimilarity(
+          yelpAddress,
+          business.location?.zip_code ?? null,
+          restaurant.yelp.address ?? null,
+          restaurant.yelp.postal_code ?? null,
+        );
+        const score = nameScore * 0.55 + distanceScore * 0.25 + addressScore * 0.2;
+        const hasStrongSignal = nameScore >= 0.5 || addressScore >= 0.7 || (nameScore >= 0.4 && distanceScore >= 0.4);
+        if (!hasStrongSignal) return null;
+
+        return {
+          business,
+          distanceMeters,
+          score,
+        };
+      })
+      .filter((candidate): candidate is { business: YelpBusinessSearchResult; distanceMeters: number | null; score: number } => candidate !== null)
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        const distanceA = a.distanceMeters ?? Number.POSITIVE_INFINITY;
+        const distanceB = b.distanceMeters ?? Number.POSITIVE_INFINITY;
+        if (distanceA !== distanceB) return distanceA - distanceB;
+        return (b.business.review_count ?? 0) - (a.business.review_count ?? 0);
+      });
+
+    const best = candidates[0]?.business;
+    if (!best || typeof best.rating !== "number" || typeof best.review_count !== "number") {
+      return null;
+    }
+
+    return {
+      rating: best.rating,
+      review_count: best.review_count,
+      price: toYelpPriceTier(best.price),
+      categories: (best.categories ?? [])
+        .map((category) => category.title?.trim())
+        .filter((title): title is string => Boolean(title)),
+      lat: typeof best.coordinates?.latitude === "number" ? best.coordinates.latitude : restaurant.yelp.lat,
+      lng: typeof best.coordinates?.longitude === "number" ? best.coordinates.longitude : restaurant.yelp.lng,
+      address: parseYelpAddress(best.location),
+      postal_code:
+        typeof best.location?.zip_code === "string" && best.location.zip_code.trim().length > 0
+          ? best.location.zip_code.trim()
+          : null,
+    };
+  } catch {
+    return null;
+  } finally {
+    timeout.clear();
+  }
+}
+
+async function backfillProminentRowsWithYelpData(
+  city: string,
+  prominentRows: Restaurant[],
+  isLocal: boolean,
+) {
+  if (prominentRows.length === 0) return;
+
+  let yelpApiKey: string;
+  try {
+    yelpApiKey = getServerEnv().YELP_API_KEY;
+  } catch {
+    return;
+  }
+
+  const lookupLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED;
+  const targetRows = prominentRows.slice(0, Math.min(lookupLimit, prominentRows.length));
+  if (targetRows.length === 0) return;
+
+  let backfilledCount = 0;
+  let rateLimited = false;
+
+  for (let i = 0; i < targetRows.length; i += 1) {
+    if (i > 0 && process.env.NODE_ENV !== "test") {
+      await new Promise((resolve) => setTimeout(resolve, YELP_PROMINENT_BACKFILL_DELAY_MS));
+    }
+    const restaurant = targetRows[i];
+    const yelpData = await findYelpDataForProminentRestaurant(city, restaurant, yelpApiKey);
+    if (yelpData === (YELP_RATE_LIMITED_SENTINEL as unknown)) {
+      rateLimited = true;
+      devLog("[prominent-yelp] rate-limited, stopping backfill", {
+        city,
+        completed: i,
+        remaining: targetRows.length - i,
+      });
+      break;
+    }
+    if (!yelpData) continue;
+    restaurant.yelp = yelpData;
+    backfilledCount += 1;
+  }
+
+  devLog("[prominent-yelp] done", {
+    city,
+    attempted: rateLimited ? backfilledCount : targetRows.length,
+    matched: backfilledCount,
+    skipped: prominentRows.length - targetRows.length,
+    rate_limited: rateLimited,
+  });
+}
+
 function countWarningCodes(warnings: SearchWarning[]) {
   const counts: Record<string, number> = {};
   for (const warning of warnings) {
@@ -228,6 +484,31 @@ type GoogleTextSearchResponse = {
   results?: GoogleTextSearchResult[];
 };
 
+type GooglePlacesNewResult = {
+  id?: string;
+  displayName?: { text?: string };
+  // Places API (New) uses `rating`; `userRating` is kept for backwards compatibility
+  // with earlier mocks/tests and potential upstream changes.
+  rating?: number;
+  userRating?: number;
+  userRatingCount?: number;
+  location?: { latitude?: number; longitude?: number };
+  formattedAddress?: string;
+  types?: string[];
+};
+
+type GooglePlacesNewResponse = {
+  places?: GooglePlacesNewResult[];
+  nextPageToken?: string;
+};
+
+type GooglePlacesNewErrorResponse = {
+  error?: {
+    status?: string;
+    message?: string;
+  };
+};
+
 function categoriesFromTypes(types: string[] | undefined): string[] {
   if (!types) return [];
   return types
@@ -264,7 +545,299 @@ function buildRestaurantFromGoogleResult(result: GoogleTextSearchResult, city: s
   };
 }
 
-async function fetchGoogleFallbackRows(city: string): Promise<{ restaurants: Restaurant[]; warnings: SearchWarning[] }> {
+function buildRestaurantFromGooglePlacesNewResult(
+  result: GooglePlacesNewResult,
+  city: string,
+  index: number,
+  idPrefix = "google-fallback",
+): Restaurant {
+  const placeId = result.id ?? null;
+  const lat = result.location?.latitude ?? 0;
+  const lng = result.location?.longitude ?? 0;
+  const address = result.formattedAddress?.trim() || null;
+  const rating =
+    typeof result.rating === "number"
+      ? result.rating
+      : typeof result.userRating === "number"
+        ? result.userRating
+        : null;
+
+  return {
+    id: `${idPrefix}-${index}`,
+    name: result.displayName?.text ?? "Unknown",
+    city,
+    yelp: {
+      rating: 0,
+      review_count: 0,
+      price: null,
+      categories: categoriesFromTypes(result.types),
+      lat,
+      lng,
+      address,
+      postal_code: extractPostalCodeFromAddress(address),
+    },
+    google: {
+      rating,
+      review_count: result.userRatingCount ?? null,
+      place_id: placeId,
+      maps_url: buildMapsUrl(placeId),
+    },
+    michelin: { award: null, green_star: false, matched: false },
+    combined_score: null,
+  };
+}
+
+function hasValidCoordinates(restaurant: Restaurant) {
+  return Number.isFinite(restaurant.yelp.lat) && Number.isFinite(restaurant.yelp.lng);
+}
+
+function prominentSelfDedupeKey(restaurant: Restaurant) {
+  const normalizedName = restaurant.name.trim().toLowerCase();
+  const lat = Number.isFinite(restaurant.yelp.lat) ? restaurant.yelp.lat.toFixed(4) : "na";
+  const lng = Number.isFinite(restaurant.yelp.lng) ? restaurant.yelp.lng.toFixed(4) : "na";
+  return `${normalizedName}|${lat}|${lng}`;
+}
+
+function isLikelyProminentDuplicate(yelpRestaurant: Restaurant, prominentRestaurant: Restaurant) {
+  if (!hasNameOverlap(yelpRestaurant.name, prominentRestaurant.name)) return false;
+  if (!hasValidCoordinates(yelpRestaurant) || !hasValidCoordinates(prominentRestaurant)) return false;
+
+  const distanceMeters = getDistanceMeters(
+    { lat: yelpRestaurant.yelp.lat, lng: yelpRestaurant.yelp.lng },
+    { lat: prominentRestaurant.yelp.lat, lng: prominentRestaurant.yelp.lng },
+  );
+  return distanceMeters <= MERGED_DEDUPE_DISTANCE_METERS;
+}
+
+function dedupeProminentAgainstYelp(yelpRows: Restaurant[], prominentRows: Restaurant[]) {
+  const yelpPlaceIds = new Set(
+    yelpRows
+      .map((restaurant) => restaurant.google.place_id)
+      .filter((placeId): placeId is string => typeof placeId === "string" && placeId.length > 0),
+  );
+  const uniqueProminentRows: Restaurant[] = [];
+  const seenProminentRows = new Set<string>();
+  const seenProminentPlaceIds = new Set<string>();
+
+  for (const prominentRow of prominentRows) {
+    if (prominentRow.google.place_id) {
+      if (seenProminentPlaceIds.has(prominentRow.google.place_id)) continue;
+      seenProminentPlaceIds.add(prominentRow.google.place_id);
+    }
+
+    const prominentKey = prominentSelfDedupeKey(prominentRow);
+    if (seenProminentRows.has(prominentKey)) continue;
+
+    if (prominentRow.google.place_id && yelpPlaceIds.has(prominentRow.google.place_id)) {
+      continue;
+    }
+
+    const hasNameAndGeoMatch = yelpRows.some((yelpRow) => isLikelyProminentDuplicate(yelpRow, prominentRow));
+    if (hasNameAndGeoMatch) continue;
+    seenProminentRows.add(prominentKey);
+    uniqueProminentRows.push(prominentRow);
+  }
+
+  return uniqueProminentRows;
+}
+
+function dedupeWarnings(warnings: SearchWarning[]) {
+  const seen = new Set<WarningCode>();
+  const deduped: SearchWarning[] = [];
+  for (const warning of warnings) {
+    if (seen.has(warning.code)) continue;
+    seen.add(warning.code);
+    deduped.push(warning);
+  }
+  return deduped;
+}
+
+function googleFallbackMergeKey(restaurant: Restaurant) {
+  if (restaurant.google.place_id) return restaurant.google.place_id;
+  return [
+    restaurant.name,
+    restaurant.yelp.lat,
+    restaurant.yelp.lng,
+    restaurant.google.rating ?? "",
+    restaurant.google.review_count ?? "",
+  ].join("|");
+}
+
+function mergeGoogleFallbackRestaurants(
+  prominentRows: Restaurant[],
+  legacyRows: Restaurant[],
+  limit: number,
+) {
+  const merged: Restaurant[] = [];
+  const seen = new Set<string>();
+
+  for (const restaurant of [...prominentRows, ...legacyRows]) {
+    const key = googleFallbackMergeKey(restaurant);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(restaurant);
+    if (merged.length >= limit) break;
+  }
+
+  return merged;
+}
+
+async function waitForProminentPageToken() {
+  if (process.env.NODE_ENV === "test") return;
+  await new Promise((resolve) => setTimeout(resolve, GOOGLE_PROMINENT_PAGE_TOKEN_DELAY_MS));
+}
+
+async function fetchGoogleProminentRows(
+  city: string,
+  options?: { resultLimit?: number; idPrefix?: string },
+): Promise<{ restaurants: Restaurant[]; warnings: SearchWarning[] }> {
+  let apiKey: string;
+  try {
+    apiKey = getServerEnv().GOOGLE_MAPS_API_KEY;
+  } catch {
+    return { restaurants: [], warnings: [{ code: "GOOGLE_UPSTREAM_ERROR", message: "Google API key is not configured." }] };
+  }
+
+  const resultLimit = options?.resultLimit ?? GOOGLE_FALLBACK_LIMIT;
+  const idPrefix = options?.idPrefix ?? "google-fallback";
+
+  const places: GooglePlacesNewResult[] = [];
+  let nextPageToken: string | undefined;
+  let warningCode: WarningCode | null = null;
+  let warningMessageText: string | null = null;
+  const prominentDeadlineMs = Date.now() + GOOGLE_PROMINENT_TOTAL_BUDGET_MS;
+
+  pageLoop: for (let page = 0; page < GOOGLE_PROMINENT_MAX_PAGES; page += 1) {
+    if (Date.now() > prominentDeadlineMs) {
+      warningCode = "GOOGLE_TIMEOUT";
+      warningMessageText = "Google prominent fallback search timed out.";
+      break;
+    }
+    if (page > 0 && !nextPageToken) break;
+    if (page > 0) {
+      await waitForProminentPageToken();
+      if (Date.now() > prominentDeadlineMs) {
+        warningCode = "GOOGLE_TIMEOUT";
+        warningMessageText = "Google prominent fallback search timed out.";
+        break;
+      }
+    }
+
+    const maxAttempts = page > 0 ? 2 : 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const remainingBudgetMs = prominentDeadlineMs - Date.now();
+      if (remainingBudgetMs <= 0) {
+        warningCode = "GOOGLE_TIMEOUT";
+        warningMessageText = "Google prominent fallback search timed out.";
+        break pageLoop;
+      }
+      const timeout = withTimeout(Math.min(GOOGLE_FALLBACK_TIMEOUT_MS, remainingBudgetMs));
+      try {
+        const payload: Record<string, unknown> = {
+          textQuery: `restaurants in ${city}`,
+          pageSize: GOOGLE_PROMINENT_PAGE_SIZE,
+        };
+        if (nextPageToken) {
+          payload.pageToken = nextPageToken;
+        }
+
+        const response = await fetch(GOOGLE_PLACES_NEW_TEXT_SEARCH_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": apiKey,
+            "X-Goog-FieldMask": GOOGLE_PLACES_NEW_FIELD_MASK,
+          },
+          body: JSON.stringify(payload),
+          signal: timeout.signal,
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          const errorPayload = (await response.json().catch(() => null)) as GooglePlacesNewErrorResponse | null;
+          const errorStatus = errorPayload?.error?.status;
+          devLog("[prominent] failed", {
+            city,
+            page,
+            attempt,
+            http_status: response.status,
+            error_status: errorStatus ?? null,
+            message: errorPayload?.error?.message ?? null,
+          });
+          const shouldRetryToken =
+            page > 0 &&
+            attempt === 0 &&
+            response.status === 400 &&
+            (errorStatus === "INVALID_ARGUMENT" || errorStatus === "INVALID_REQUEST");
+          if (shouldRetryToken) {
+            await waitForProminentPageToken();
+            continue;
+          }
+
+          warningCode = response.status === 429 ? "GOOGLE_RATE_LIMITED" : "GOOGLE_UPSTREAM_ERROR";
+          warningMessageText = "Google prominent fallback search failed.";
+          break pageLoop;
+        }
+
+        const result = (await response.json()) as GooglePlacesNewResponse;
+        devLog("[prominent] ok", {
+          city,
+          page,
+          received: result.places?.length ?? 0,
+          has_next_page_token: typeof result.nextPageToken === "string" && result.nextPageToken.trim().length > 0,
+        });
+        if (result.places?.length) {
+          places.push(...result.places);
+        }
+        nextPageToken = typeof result.nextPageToken === "string" && result.nextPageToken.trim().length > 0
+          ? result.nextPageToken
+          : undefined;
+        if (places.length >= GOOGLE_PROMINENT_MAX_RESULTS) break pageLoop;
+        break;
+      } catch (error) {
+        devLog("[prominent] exception", {
+          city,
+          page,
+          attempt,
+          name: error instanceof Error ? error.name : null,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        warningCode = error instanceof Error && error.name === "AbortError" ? "GOOGLE_TIMEOUT" : "GOOGLE_UPSTREAM_ERROR";
+        warningMessageText = "Google prominent fallback search failed.";
+        break pageLoop;
+      } finally {
+        timeout.clear();
+      }
+    }
+  }
+
+  const dedupedPlaces = Array.from(
+    new Map(
+      places.map((place, index) => [place.id ?? `${place.displayName?.text ?? "unknown"}-${index}`, place]),
+    ).values(),
+  ).slice(0, GOOGLE_PROMINENT_MAX_RESULTS);
+
+  const restaurants = dedupedPlaces
+    .slice(0, resultLimit)
+    .map((result, i) => buildRestaurantFromGooglePlacesNewResult(result, city, i, idPrefix));
+
+  const warnings =
+    warningCode && warningMessageText
+      ? [{ code: warningCode, message: warningMessageText }]
+      : [];
+
+  devLog("[prominent] done", {
+    city,
+    fetched_places: places.length,
+    deduped_places: dedupedPlaces.length,
+    returned_restaurants: restaurants.length,
+    warning_code: warningCode,
+  });
+
+  return { restaurants, warnings };
+}
+
+async function fetchGoogleFallbackRowsLegacy(city: string): Promise<{ restaurants: Restaurant[]; warnings: SearchWarning[] }> {
   let apiKey: string;
   try {
     apiKey = getServerEnv().GOOGLE_MAPS_API_KEY;
@@ -307,14 +880,105 @@ async function fetchGoogleFallbackRows(city: string): Promise<{ restaurants: Res
   }
 }
 
+async function fetchGoogleFallbackRows(
+  city: string,
+  prefetchedProminent?: { restaurants: Restaurant[]; warnings: SearchWarning[] },
+): Promise<{ restaurants: Restaurant[]; warnings: SearchWarning[]; prominent: GoogleProminentMetrics }> {
+  const normalizeFallbackPrefetchIds = (restaurants: Restaurant[]) =>
+    restaurants.map((restaurant, index) => ({
+      ...restaurant,
+      id: `google-fallback-${index}`,
+    }));
+
+  const prominentSource = prefetchedProminent
+    ? {
+      restaurants: normalizeFallbackPrefetchIds(
+        prefetchedProminent.restaurants.slice(0, GOOGLE_FALLBACK_LIMIT),
+      ),
+      warnings: prefetchedProminent.warnings,
+    }
+    : await fetchGoogleProminentRows(city);
+  const prominent = prominentSource;
+  const prominentFetched = prominentSource.restaurants.length;
+  if (prominent.restaurants.length >= GOOGLE_FALLBACK_LIMIT && prominent.warnings.length === 0) {
+    return {
+      restaurants: prominent.restaurants,
+      warnings: prominent.warnings,
+      prominent: {
+        fetched: prominentFetched,
+        added: prominent.restaurants.length,
+        deduped: Math.max(0, prominentFetched - prominent.restaurants.length),
+      },
+    };
+  }
+
+  const legacy = await fetchGoogleFallbackRowsLegacy(city);
+  if (prominent.restaurants.length === 0 && (legacy.restaurants.length > 0 || legacy.warnings.length === 0)) {
+    return {
+      restaurants: legacy.restaurants,
+      warnings: legacy.warnings,
+      prominent: {
+        fetched: prominentFetched,
+        added: 0,
+        deduped: prominentFetched,
+      },
+    };
+  }
+
+  if (prominent.restaurants.length > 0 && legacy.restaurants.length > 0) {
+    const mergedRestaurants = mergeGoogleFallbackRestaurants(
+      prominent.restaurants,
+      legacy.restaurants,
+      GOOGLE_FALLBACK_LIMIT,
+    );
+    const hasFullMergedSet = mergedRestaurants.length >= GOOGLE_FALLBACK_LIMIT;
+    const mergedWarnings = hasFullMergedSet && legacy.warnings.length === 0
+      ? []
+      : dedupeWarnings([...prominent.warnings, ...legacy.warnings]);
+    return {
+      restaurants: mergedRestaurants,
+      warnings: mergedWarnings,
+      prominent: {
+        fetched: prominentFetched,
+        added: Math.min(prominent.restaurants.length, mergedRestaurants.length),
+        deduped: Math.max(0, prominentFetched - Math.min(prominent.restaurants.length, mergedRestaurants.length)),
+      },
+    };
+  }
+
+  if (prominent.restaurants.length > 0) {
+    return {
+      restaurants: prominent.restaurants.slice(0, GOOGLE_FALLBACK_LIMIT),
+      warnings: dedupeWarnings(prominent.warnings),
+      prominent: {
+        fetched: prominentFetched,
+        added: prominent.restaurants.slice(0, GOOGLE_FALLBACK_LIMIT).length,
+        deduped: Math.max(0, prominentFetched - prominent.restaurants.slice(0, GOOGLE_FALLBACK_LIMIT).length),
+      },
+    };
+  }
+
+  return {
+    restaurants: [],
+    warnings: dedupeWarnings([...legacy.warnings, ...prominent.warnings]),
+    prominent: {
+      fetched: prominentFetched,
+      added: 0,
+      deduped: prominentFetched,
+    },
+  };
+}
+
 async function googleOnlyFallback(
   city: string,
   context: { requestStartedAtMs: number; yelpStatus: string; yelpMs: number | null },
+  prefetchedProminent?: { restaurants: Restaurant[]; warnings: SearchWarning[] },
+  prefetchedProminentMs?: number | null,
 ) {
   const googleStartedAtMs = Date.now();
-  const fallback = await fetchGoogleFallbackRows(city);
+  const fallback = await fetchGoogleFallbackRows(city, prefetchedProminent);
   const googleMs = Date.now() - googleStartedAtMs;
-  const scored = computeCombinedScores(fallback.restaurants);
+  const scored = shouldComputeCombinedScore() ? computeCombinedScores(fallback.restaurants) : fallback.restaurants;
   const accepted = scored.filter((restaurant) => hasGoogleData(restaurant.google)).length;
   const warningCodes = fallback.warnings.map((warning) => warning.code);
   const fallbackFailureCounts = countWarningCodes(fallback.warnings);
@@ -332,12 +996,16 @@ async function googleOnlyFallback(
     google_enrichment_failures: fallbackFailureCounts,
     google_match_rate: ratioOrNull(accepted, scored.length),
     michelin_match_rate: null,
+    google_prominent_fetched: fallback.prominent.fetched,
+    google_prominent_added: fallback.prominent.added,
+    google_prominent_deduped: fallback.prominent.deduped,
+    google_prominent_ms: prefetchedProminentMs ?? null,
     warning_codes: warningCodes,
   });
 
   const response: SearchResponseSuccess = {
     city,
-    restaurants: scored,
+    restaurants: toProfileRestaurants(scored),
     warnings: fallback.warnings,
     google_only: true,
   };
@@ -362,6 +1030,14 @@ export async function POST(request: Request) {
       status: 400,
     });
   }
+
+  const prominentPromise = fetchGoogleProminentRows(city, {
+    resultLimit: GOOGLE_PROMINENT_MAX_RESULTS,
+    idPrefix: "google-prominent",
+  })
+    .then((result) => ({ result, finishedAtMs: Date.now() }))
+    .catch(() => ({ result: { restaurants: [], warnings: [] }, finishedAtMs: Date.now() }));
+  const prominentStartedAtMs = Date.now();
 
   const origin = new URL(request.url).origin;
   const isLocal = isLocalOrigin(origin);
@@ -406,7 +1082,15 @@ export async function POST(request: Request) {
       } catch {
         if (!yelpResponse) {
           yelpStatus = "network_error";
-          return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+          const prominentOutcome = await prominentPromise;
+          const prefetchedProminent = prominentOutcome.result;
+          const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
+          return googleOnlyFallback(
+            city,
+            { requestStartedAtMs, yelpStatus, yelpMs },
+            prefetchedProminent,
+            prefetchedProminentMs,
+          );
         }
       }
     }
@@ -437,7 +1121,15 @@ export async function POST(request: Request) {
         yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
       } catch {
         yelpStatus = "network_error";
-        return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+        const prominentOutcome = await prominentPromise;
+        const prefetchedProminent = prominentOutcome.result;
+        const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
+        return googleOnlyFallback(
+          city,
+          { requestStartedAtMs, yelpStatus, yelpMs },
+          prefetchedProminent,
+          prefetchedProminentMs,
+        );
       }
     }
   }
@@ -469,19 +1161,39 @@ export async function POST(request: Request) {
         google_enrichment_failures: {},
         google_match_rate: null,
         michelin_match_rate: null,
+        google_prominent_fetched: 0,
+        google_prominent_added: 0,
+        google_prominent_deduped: 0,
+        google_prominent_ms: null,
         warning_codes: [],
       });
       return NextResponse.json(failureEnvelope(city, code, message), { status });
     }
 
-    return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus: code, yelpMs });
+    const prominentOutcome = await prominentPromise;
+    const prefetchedProminent = prominentOutcome.result;
+    const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
+    return googleOnlyFallback(
+      city,
+      { requestStartedAtMs, yelpStatus: code, yelpMs },
+      prefetchedProminent,
+      prefetchedProminentMs,
+    );
   }
 
   const yelpPayload = (await yelpResponse.json()) as { city: string; restaurants: YelpSeed[] };
   const restaurants = yelpPayload.restaurants.map((seed) => buildRestaurantFromSeed(seed));
 
   if (restaurants.length === 0) {
-    return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus: "zero_results", yelpMs });
+    const prominentOutcome = await prominentPromise;
+    const prefetchedProminent = prominentOutcome.result;
+    const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
+    return googleOnlyFallback(
+      city,
+      { requestStartedAtMs, yelpStatus: "zero_results", yelpMs },
+      prefetchedProminent,
+      prefetchedProminentMs,
+    );
   }
 
   const maxGoogleEnrichments = isLocal ? MAX_GOOGLE_ENRICHMENTS : DEPLOYED_MAX_GOOGLE_ENRICHMENTS;
@@ -567,7 +1279,25 @@ export async function POST(request: Request) {
     }),
   }));
 
-  const scoredRestaurants = computeCombinedScores(restaurantsWithMichelin);
+  const scoredRestaurants = shouldComputeCombinedScore() ? computeCombinedScores(restaurantsWithMichelin) : restaurantsWithMichelin;
+  const prominentOutcome = await prominentPromise;
+  const prominent = prominentOutcome.result;
+  const prominentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
+  const prominentUniqueRows = dedupeProminentAgainstYelp(restaurants, prominent.restaurants);
+  await backfillProminentRowsWithYelpData(city, prominentUniqueRows, isLocal);
+  const prominentRowsWithMichelin = prominentUniqueRows.map((restaurant) => ({
+    ...restaurant,
+    michelin: matchMichelinForRestaurant({
+      city: restaurant.city,
+      lat: restaurant.yelp.lat,
+      lng: restaurant.yelp.lng,
+    }),
+  }));
+  const scoredProminentRows = shouldComputeCombinedScore() ? computeCombinedScores(prominentRowsWithMichelin) : prominentRowsWithMichelin;
+  const mergedRestaurants = [...scoredRestaurants, ...scoredProminentRows].slice(0, MERGED_RESULT_LIMIT);
+  const prominentFetched = prominent.restaurants.length;
+  const prominentAdded = scoredProminentRows.length;
+  const prominentDeduped = Math.max(0, prominentFetched - prominentAdded);
   const googleAccepted = restaurants
     .slice(0, targetCount)
     .filter((restaurant) => hasGoogleData(restaurant.google)).length;
@@ -604,12 +1334,16 @@ export async function POST(request: Request) {
     google_enrichment_failures: googleFailureCodes,
     google_match_rate: ratioOrNull(googleAccepted, googleAttempted),
     michelin_match_rate: ratioOrNull(michelinMatchedCount, restaurantsWithMichelin.length),
+    google_prominent_fetched: prominentFetched,
+    google_prominent_added: prominentAdded,
+    google_prominent_deduped: prominentDeduped,
+    google_prominent_ms: prominentMs,
     warning_codes: warnings.map((warning) => warning.code),
   });
 
   const response: SearchResponseSuccess = {
     city,
-    restaurants: scoredRestaurants,
+    restaurants: toProfileRestaurants(mergedRestaurants),
     warnings,
   };
 

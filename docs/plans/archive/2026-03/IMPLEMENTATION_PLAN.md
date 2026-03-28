@@ -15,8 +15,10 @@ status: implemented
 Build and ship the first working version of Claire Eats as a table-first restaurant research app for travelers:
 
 - User enters a city.
-- System fetches Yelp restaurants as the primary list.
-- System enriches each result with Google Places (best-effort).
+- System fetches Yelp restaurants as the primary list (top 50 by Yelp reviews).
+- System enriches each Yelp result with Google Places (best-effort).
+- System also fetches Google "prominent" restaurants (up to 60) and appends unique additions.
+- Final normal-mode list is merged + deduped and capped at 80 rows.
 - If Yelp returns zero rows for a city (or non-hard-fail coverage/location errors), system may show Google-only fallback rows with explicit labeling.
 - UI shows one sortable comparison table with map deep-links.
 
@@ -30,8 +32,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - **PRD 5.2 Yelp aggregation** → Phase 1: `/api/yelp` + normalization into shared `Restaurant` shape
 - **PRD 5.2 Google enrichment** → Phase 1: `/api/google` + best-effort enrichment of top N Yelp rows; Phase 1.5B: Google-only fallback mode when Yelp has no usable coverage (zero rows / non-hard-fail location errors)
 - **PRD 5.3 Matching logic** → Phase 1: `lib/matching.ts` (Google acceptance ~100m / overlap)
-- **PRD 5.4 Combined score** → Phase 1.5A: `lib/scoring.ts` with absolute 10-point equal-weight scoring
-- **PRD 5.5 Table view + 5.6 Sorting** → Phase 1: table with Yelp-first sorting; Phase 1.5A+: add Score column and expanded sort controls (Yelp/Google rating & reviews + score)
+- **PRD 5.4 Combined score** → Phase 1.5A+: `lib/scoring.ts` with absolute 10-point review-weighted scoring (weights = source review counts)
+- **PRD 5.5 Table view + 5.6 Sorting** → Phase 1+: table with expanded sort controls; default sort is `Total Reviews` and includes CSV export
 - **PRD 9 Edge cases** → Phase 1+: warnings contract, partial result rendering, fallback states
 
 ## Design Decisions
@@ -45,7 +47,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Treat Yelp/Google API quotas and latency as first-class constraints from MVP.
   - Use bounded concurrency, timeouts, and fallback behavior for 429/5xx failures.
 - **Yelp as canonical row source.**
-  - Yelp decides row inclusion by default; Google enriches existing rows.
+  - Yelp decides the primary row set (top 50).
+  - In normal mode, Google prominent restaurants can be appended as additive rows after dedupe.
   - Exception: if Yelp returns zero rows or a non-hard-fail location/coverage error for a city, enable Google-only fallback mode with explicit UI labeling.
   - This guarantees stable rows even when enrichment providers fail.
 - **Coordinate-first matching strategy.**
@@ -61,7 +64,10 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Phase 1.5B: loading/error UX + Google-only fallback mode + instrumentation for PRD metrics.
 - **Operational defaults are explicit for MVP (tunable constants, not PRD requirements).**
   - Yelp result limit: `50` rows per city search (sorted by `review_count`).
-  - Google enrichment: all `50` Yelp rows, max concurrency `5`.
+  - Google enrichment: all `50` Yelp rows, max concurrency `5` (deployed enrichment cap `45` for Cloudflare subrequest budget).
+  - Google prominent list: up to `60` rows via Places API (New), paginated (`3 x 20`).
+  - Merged normal-mode result cap: `80`.
+  - Yelp backfill for prominent additions: best-effort, local-first limits to balance latency/rate-limit risk.
   - Upstream timeout budget: `3000ms` per Google request; overall enrichment budget auto-derived from cap/concurrency/timeout.
   - Retry policy: `1` retry for `429`/`5xx` with exponential backoff (base `300ms` + jitter).
 - **Compliance and attribution are ship blockers.**
@@ -171,7 +177,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
    - `app/page.tsx`: state wiring, loading, empty, and error states.
 
 6. [x] **MVP sorting and formatting**
-   - Default sort by Yelp review count.
+   - Default sort by Total Reviews (Yelp + Google), descending.
    - Add helper formatting for counts and fallback placeholders (`-`).
    - Ensure map link button opens valid Google Maps URL when available.
 
@@ -201,7 +207,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - `Price` (may be `-`)
   - `Cuisine` (tags)
   - `Map` (Open button → `maps_url` when available; otherwise disabled / `-`)
-- **Yelp result count:** `50` rows sorted by `review_count`, all enriched with Google.
+- **Yelp result count:** base `50` rows sorted by `review_count`, all enriched with Google.
+- **Merged normal-mode count:** may exceed 50 via unique Google prominent additions, capped at `80`.
 - **Not in current scope**
   - `Michelin` column (archived)
   - Pagination (removed; all 50 rows shown in a single list)
@@ -230,7 +237,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
    - Return `{ award, green_star, matched }` or empty values.
 
 3. [x] **Scoring engine (`lib/scoring.ts`)**
-   - Implement absolute 10-point scoring: each rating is converted to a 10-point scale (`rating * 2`) and averaged with equal Yelp/Google weight (50/50).
+   - Implement absolute 10-point scoring: each rating is converted to a 10-point scale (`rating * 2`) and combined via review-count weighting.
    - Handle single-source fallback: if only one source has real data (rating > 0, review_count > 0), use that source alone.
    - Google-only fallback rows (Yelp placeholder zeros) are correctly treated as single-source (Google only).
    - Round to 1 decimal. No min-max normalization (scores are absolute, not relative to the result set).
@@ -263,8 +270,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - **Table columns added in Phase 1.5A**
   - `Score` (0–10, 1 decimal; `-` if insufficient data)
 - **Sorting**
-  - Default sort: `Yelp Reviews` (descending); `Google Reviews` when in Google-only mode.
-  - Available sort options: Combined Score, Yelp Rating, Yelp Reviews, Google Rating, Google Reviews.
+  - Default sort: `Total Reviews` (descending) in both normal and Google-only modes.
+  - Available sort options: Combined Score, Total Reviews, Yelp Rating, Yelp Reviews, Google Rating, Google Reviews.
   - Yelp sort options are disabled (grayed out) in Google-only fallback mode.
   - All sortable columns show a triangle icon for discoverability; active column shows a darker icon.
 - **Still out of scope in Phase 1.5A**
@@ -351,16 +358,18 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Address-driven acceptance path.
   - `/api/google` using location-bias query params and choosing best candidate, not always first.
 
-1. [x] **Yelp 50-row fetch, full Google enrichment, scoring overhaul, and UI polish (implemented)**
+1. [x] **Yelp 50-row fetch, full Google enrichment, merged-list behavior, scoring overhaul, and UI polish (implemented)**
    - Yelp endpoint fetches `50` rows sorted by `review_count` in a single request (removed 2-batch 100-row approach).
    - Google enrichment cap raised to `50` with auto-derived budget; all Yelp rows get a Google match attempt.
    - Yelp address/postal code extracted and passed to Google for address-aware matching.
-   - Scoring replaced: now uses absolute 10-point scale (`rating * 2`, equal 50/50 Yelp/Google weight) instead of log-based min-max normalization. Google-only fallback rows correctly ignore placeholder Yelp zeros.
+   - Scoring replaced: now uses absolute 10-point scale (`rating * 2`, review-count weighted across Yelp/Google) instead of log-based min-max normalization. Google-only fallback rows correctly ignore placeholder Yelp zeros.
    - `ScorePill` color tiers updated for the new absolute range (9+: emerald, 8–8.9: teal, 7–7.9: sky, 6–6.9: amber, <6: zinc).
    - Pagination removed; all 50 rows displayed in one list.
-   - Default sort changed to `Yelp Reviews` (or `Google Reviews` in Google-only mode).
+   - Default sort changed to `Total Reviews` (Yelp + Google).
    - Sort icons (downward triangle) added to all sortable column headers for discoverability.
    - Hero section redesigned with warm cream background, red accent, and decorative elements.
+   - Added CSV export (`Download CSV`) for current sorted results.
+   - Added clearer loading UX (spinner + explicit note about slower Yelp/Google matching and backfill).
 
 **Phase 2 (50-row + scoring + UI) verification snapshot (2026-03-24)**
 
@@ -370,7 +379,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - Coverage includes:
   - Yelp single-batch 50-row fetch with `sort_by=review_count`.
   - Google enrichment cap enforced at 50 (60-row fixture verifies exactly 50 Google calls).
-  - Scoring: equal-weight 10-point for both sources, Yelp-only fallback, Google-only fallback (placeholder zeros ignored), both-missing returns null.
+  - Scoring: review-weighted 10-point across both sources, Yelp-only fallback, Google-only fallback (placeholder zeros ignored), both-missing returns null.
   - UI: no pagination controls rendered, sort icons visible on all sortable headers.
 
 2. [x] **Unit tests (complete)**
@@ -425,7 +434,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - Yelp success still returns usable rows even if Google enrichment partially fails.
 - If Yelp has no usable coverage (zero rows or non-hard-fail location/coverage errors), users still get Google-only fallback results with clear source labeling.
 - Map links open Google Maps for enriched rows.
-- Combined score displays 0.0-10.0 (1 decimal) on an absolute scale (rating * 2, equal Yelp/Google weight).
+- Combined score displays 0.0-10.0 (1 decimal) on an absolute scale (rating * 2, review-count weighted across Yelp/Google).
 - Key PRD behaviors are test-covered (matching thresholds, score fallback, partial failure handling).
 - Measured performance is acceptable: search responses are typically under `5s` and p95 under `10s`.
 - Usage instrumentation supports PRD validation:
@@ -438,4 +447,67 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - Where should Michelin source refresh happen (manual script run vs scheduled pipeline)?
 - Do we cache city search results in-memory during MVP demos to reduce repeated API costs?
 
+### Google Prominent List (Places API New)
+
+Goal: evaluate Google "prominence" as an additional signal source by fetching up to `60` prominent restaurants per city via Places API (New), while preserving current product rules:
+
+- Yelp remains the canonical row source for normal mode.
+- Google may enrich Yelp rows (and power Google-only fallback mode where already allowed).
+- Missing Google data must not remove Yelp rows.
+
+#### Scope and status
+
+1. [x] Add adapter for Places API (New) Text Search:
+   - Endpoint: `POST https://places.googleapis.com/v1/places:searchText`
+   - Headers:
+     - `X-Goog-Api-Key: <GOOGLE_MAPS_API_KEY>`
+     - `X-Goog-FieldMask: places.id,places.displayName,places.rating,places.userRatingCount,places.formattedAddress,places.location,nextPageToken`
+   - Body:
+     - `textQuery: "restaurants in <city>"`
+     - `pageSize: 20`
+2. [x] Implement strict 3-page pagination flow to reach max `60` results:
+   - Request #1 (`pageSize: 20`) -> capture `places[]` + `nextPageToken`
+   - Wait ~`2s` token propagation delay
+   - Request #2 (`pageToken`) -> append results + capture new token
+   - Wait ~`2s`
+   - Request #3 (`pageToken`) -> append results (token may be absent/null afterward)
+3. [x] Add guardrails and failure handling:
+   - If `nextPageToken` missing early, stop pagination without hard-failing.
+   - Handle `INVALID_ARGUMENT`/`INVALID_REQUEST` by retrying once after `2s` when token freshness is suspected.
+   - Keep all failures non-blocking for Yelp-first table rendering.
+4. [x] Define how the prominent list is used:
+   - Implemented as **normal-mode merged additions** (Yelp top 50 retained + unique prominent additions appended).
+   - Prominent fetch can gather up to `60`; merged normal-mode output is capped at `80`.
+   - Google-only fallback mode remains available when Yelp has no usable coverage.
+5. [x] Add tests for prominent-list behavior:
+   - Pagination path (20->40->60 fetch, capped to displayed fallback limit).
+   - Token-delay retry behavior for `INVALID_ARGUMENT`/`INVALID_REQUEST` page-token freshness errors.
+   - Verify fallback path remains non-blocking and does not regress Yelp-first flows.
+
+#### Explicit constraints for this candidate
+
+- Do **not** replace Yelp as canonical row inclusion source unless product scope changes.
+- Do **not** gate existing `/api/search` success on all 3 Google pages succeeding.
+- Keep cost/performance bounded (additional Google calls must stay within platform and quota limits).
+
 These are optional future enhancements and do not block the implemented scope captured in this archived plan.
+
+### Post-plan implemented refinements (2026-03)
+
+- Yelp backfill for Google-prominent additions is implemented as best-effort enrichment:
+  - Per-row Yelp name/location lookup, candidate scoring by name/address/distance, and strict early-stop on Yelp rate-limit (`429`).
+  - Local/dev limits and timeouts are tuned to avoid excessive loading time while improving match yield.
+- Table enhancements implemented:
+  - `Total Reviews` column (`Yelp + Google`) with sortable header and default sort.
+  - Header tooltips on `Score` and `Total Reviews`.
+  - CSV export button for downloading the current sorted list.
+- Loading UX improvements implemented:
+  - Spinner + explicit status copy indicating that Yelp/Google matching/backfill can take longer.
+- Public/private mode split (in progress):
+  - Status: implemented for planned Phase 1-4 scope.
+  - Added profile-based UI behavior via `APP_PROFILE` / `NEXT_PUBLIC_APP_PROFILE`.
+  - Public mode currently hides CSV export, score column, and total-review numeric display, and uses `Popularity Rank` (rank-only) presentation.
+  - Private mode preserves the current personal workflow (CSV + score + total reviews).
+  - Public API payloads now redact derived `combined_score` in public profile responses.
+  - Route-level tests cover public-profile payload redaction in both yelp-primary and google-only fallback paths.
+  - Optional follow-up: add development-time warning when `APP_PROFILE` and `NEXT_PUBLIC_APP_PROFILE` are misaligned.

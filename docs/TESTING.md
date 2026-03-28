@@ -46,12 +46,31 @@ Prioritize logic that protects core product constraints:
 1. Yelp-first row inclusion behavior
 2. Google enrichment acceptance/rejection logic
 3. Michelin nearest-match threshold logic
-4. Combined score fallback behavior with missing data
+4. Public/private profile behavior and response redaction contracts
 5. API route partial-failure warning contracts
 
 ---
 
-## 5. Manual QA Checklist (MVP)
+## 5. Focused Test Commands
+
+Use focused runs first, then broaden only if needed:
+
+```powershell
+# UI and profile behavior (public/private table behavior)
+npm.cmd run test -- tests/page.test.tsx
+
+# Route orchestration and API contracts
+npm.cmd run test -- tests/phase1-routes.test.ts
+
+# Full suite when changes are broad
+npm.cmd run test
+```
+
+For public/private changes, run both `tests/page.test.tsx` and `tests/phase1-routes.test.ts`.
+
+---
+
+## 6. Manual QA Checklist (MVP)
 
 - Search by city returns a table when Yelp succeeds
 - Missing Google data does not remove Yelp rows
@@ -59,10 +78,13 @@ Prioritize logic that protects core product constraints:
 - API failures display clear error states without crashing
 - `GET /api/config` returns clear `CONFIG_ERROR` when required env values are missing
 - Analytics events are logged in dev when searching, opening map links, and leaving/replacing a results view (`/api/events`)
+- Public profile hides score/CSV, shows `Popularity Rank`, and keeps disabled sort controls
+- Public API response returns `combined_score: null` for all rows
+- In development, mismatched `APP_PROFILE` vs `NEXT_PUBLIC_APP_PROFILE` logs a warning
 
 ---
 
-## 6. CI Quality Gate
+## 7. CI Quality Gate
 
 Minimum gate for pull requests:
 
@@ -77,7 +99,7 @@ For Phase 1 route/backend changes, ensure tests cover:
 
 ---
 
-## 7. Notes for Agents
+## 8. Notes for Agents
 
 - Keep tests focused on behavior, not implementation details.
 - Add or update tests in the same change for new logic.

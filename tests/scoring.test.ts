@@ -3,7 +3,7 @@ import { computeCombinedScores, computeRawCombinedScore } from "../lib/scoring";
 import type { Restaurant } from "../lib/types";
 
 describe("computeRawCombinedScore", () => {
-  it("uses equal Yelp/Google weighting on a 10-point scale", () => {
+  it("uses review-count weighting on a 10-point scale", () => {
     const score = computeRawCombinedScore({
       yelp: {
         rating: 4.5,
@@ -21,8 +21,9 @@ describe("computeRawCombinedScore", () => {
       },
     });
 
-    // Yelp 4.5 -> 9.0, Google 4.2 -> 8.4, equal-weight average -> 8.7
-    expect(score).toBeCloseTo(8.7);
+    // Yelp 4.5 -> 9.0 (100 reviews), Google 4.2 -> 8.4 (80 reviews)
+    // weighted average -> (9.0*100 + 8.4*80) / 180 = 8.733...
+    expect(score).toBeCloseTo(8.733, 3);
   });
 
   it("falls back to Yelp-only 10-point score when Google is missing", () => {
@@ -155,7 +156,29 @@ describe("computeCombinedScores", () => {
     }
 
     expect(scored[0].combined_score).toBe(8);
-    expect(scored[1].combined_score).toBe(8.9);
+    expect(scored[1].combined_score).toBe(8.8);
     expect(scored[2].combined_score).toBe(8.4);
+  });
+
+  it("leans toward source with higher review count", () => {
+    const score = computeRawCombinedScore({
+      yelp: {
+        rating: 4.2,
+        review_count: 1200,
+        price: "$$",
+        categories: [],
+        lat: 0,
+        lng: 0,
+      },
+      google: {
+        rating: 4.7,
+        review_count: 120,
+        place_id: null,
+        maps_url: null,
+      },
+    });
+
+    // Yelp dominates due to significantly higher review count.
+    expect(score).toBeCloseTo(8.49, 2);
   });
 });

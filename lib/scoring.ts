@@ -1,15 +1,8 @@
 import type { Restaurant } from "@/lib/types";
 
-const YELP_WEIGHT = 0.5;
-const GOOGLE_WEIGHT = 0.5;
-
 function toTenPointRating(rating: number | null): number | null {
   if (rating === null || !Number.isFinite(rating)) return null;
   return Math.min(10, Math.max(0, rating * 2));
-}
-
-function getSourceWeight(weight: number, score: number | null) {
-  return score === null ? 0 : weight;
 }
 
 function weightedAverage(values: Array<{ score: number | null; weight: number }>) {
@@ -36,9 +29,8 @@ function hasRealRatings(source: { rating: number | null; review_count: number | 
 export function computeRawCombinedScore(restaurant: Pick<Restaurant, "yelp" | "google">) {
   const yelpScore = hasRealRatings(restaurant.yelp) ? toTenPointRating(restaurant.yelp.rating) : null;
   const googleScore = hasRealRatings(restaurant.google) ? toTenPointRating(restaurant.google.rating) : null;
-
-  const yelpWeight = getSourceWeight(YELP_WEIGHT, yelpScore);
-  const googleWeight = getSourceWeight(GOOGLE_WEIGHT, googleScore);
+  const yelpWeight = yelpScore === null ? 0 : restaurant.yelp.review_count;
+  const googleWeight = googleScore === null ? 0 : (restaurant.google.review_count ?? 0);
 
   return weightedAverage([
     { score: yelpScore, weight: yelpWeight },

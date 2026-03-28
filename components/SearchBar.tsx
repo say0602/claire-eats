@@ -109,7 +109,15 @@ export function SearchBar({
           className="h-12 rounded-r-xl rounded-l-none bg-[#C4342D] px-8 text-base font-semibold text-white transition-colors hover:bg-[#AD2E29] disabled:cursor-not-allowed disabled:bg-[#C4342D]/70"
           disabled={isSubmitDisabled}
         >
-          {isLoading ? "Searching..." : "Search"}
+          <span className="inline-flex items-center gap-2">
+            {isLoading ? (
+              <span
+                aria-hidden="true"
+                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/60 border-t-white"
+              />
+            ) : null}
+            <span>{isLoading ? "Searching..." : "Search"}</span>
+          </span>
         </button>
       </div>
     </form>
