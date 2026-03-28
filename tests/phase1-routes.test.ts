@@ -758,6 +758,72 @@ describe("search orchestrator", () => {
     expect(payload.restaurants[0].name).toBe("Network Fallback Place");
   });
 
+  it("recovers from internal Yelp self-fetch failure by invoking Yelp route handler directly", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        throw new TypeError("self fetch failed");
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        return Response.json({
+          businesses: [
+            {
+              id: "y1",
+              name: "Recovered Yelp Row",
+              rating: 4.4,
+              review_count: 3200,
+              price: "$$",
+              categories: [{ title: "American" }],
+              coordinates: { latitude: 37.77, longitude: -122.42 },
+              location: {
+                address1: "123 Recovery St",
+                zip_code: "94103",
+                display_address: ["123 Recovery St", "San Francisco, CA 94103"],
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.6,
+            review_count: 1800,
+            place_id: "recovered-google",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:recovered-google",
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).not.toBe(true);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].id).toBe("y1");
+    expect(payload.restaurants[0].yelp.review_count).toBe(3200);
+    expect(payload.restaurants[0].google.place_id).toBe("recovered-google");
+  });
+
   it("returns empty with warning when Yelp returns zero and Google also fails", async () => {
     process.env.YELP_API_KEY = "test-key";
     process.env.GOOGLE_MAPS_API_KEY = "test-key";

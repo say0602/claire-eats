@@ -4,6 +4,7 @@ import { getServerEnv } from "@/lib/env";
 import { buildMapsUrl, rejectGoogleEnrichment } from "@/lib/matching";
 import { matchMichelinForRestaurant } from "@/lib/michelin";
 import { computeCombinedScores } from "@/lib/scoring";
+import { POST as yelpPost } from "@/app/api/yelp/route";
 
 const MAX_GOOGLE_ENRICHMENTS = 50;
 const GOOGLE_CONCURRENCY = 5;
@@ -322,8 +323,8 @@ export async function POST(request: Request) {
   let yelpResponse: Response;
   let yelpMs: number | null = null;
   let yelpStatus = "unknown";
+  const yelpStartedAtMs = Date.now();
   try {
-    const yelpStartedAtMs = Date.now();
     yelpResponse = await fetch(`${origin}/api/yelp`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -333,8 +334,22 @@ export async function POST(request: Request) {
     yelpMs = Date.now() - yelpStartedAtMs;
     yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
   } catch {
-    yelpStatus = "network_error";
-    return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+    // Cloudflare Worker deployments can fail self-fetch to same origin route handlers.
+    // Fallback to direct route handler invocation before switching to Google-only mode.
+    try {
+      yelpResponse = await yelpPost(
+        new Request("http://internal/api/yelp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ city }),
+        }),
+      );
+      yelpMs = Date.now() - yelpStartedAtMs;
+      yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
+    } catch {
+      yelpStatus = "network_error";
+      return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+    }
   }
 
   if (!yelpResponse.ok) {
