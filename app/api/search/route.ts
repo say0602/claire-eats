@@ -45,6 +45,7 @@ const YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT = 30;
 const YELP_PROMINENT_BACKFILL_DELAY_MS_LOCAL = 120;
 const YELP_PROMINENT_BACKFILL_DELAY_MS_DEPLOYED_DEFAULT = 350;
 const YELP_PROMINENT_RATE_LIMIT_RETRY_DELAY_MS_DEPLOYED_DEFAULT = 1500;
+const YELP_PROMINENT_MAX_CONSECUTIVE_429_DEPLOYED_DEFAULT = 8;
 const YELP_RATE_LIMITED_SENTINEL = Symbol("YELP_RATE_LIMITED");
 
 function devLog(...args: unknown[]) {
@@ -246,6 +247,14 @@ function getProminentRateLimitRetryDelayMs(isLocal: boolean) {
   );
 }
 
+function getProminentMaxConsecutive429(isLocal: boolean) {
+  if (isLocal) return 1;
+  return parseNonNegativeIntegerEnv(
+    process.env.YELP_PROMINENT_MAX_CONSECUTIVE_429_DEPLOYED,
+    YELP_PROMINENT_MAX_CONSECUTIVE_429_DEPLOYED_DEFAULT,
+  );
+}
+
 async function fetchGoogleEnrichment(
   origin: string,
   body: Record<string, unknown>,
@@ -441,11 +450,14 @@ async function backfillProminentRowsWithYelpData(
   const lookupLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : getDeployedProminentLookupLimit();
   const backfillDelayMs = getProminentBackfillDelayMs(isLocal);
   const rateLimitRetryDelayMs = getProminentRateLimitRetryDelayMs(isLocal);
+  const maxConsecutive429 = getProminentMaxConsecutive429(isLocal);
   const targetRows = prominentRows.slice(0, Math.min(lookupLimit, prominentRows.length));
   if (targetRows.length === 0) return;
 
   let backfilledCount = 0;
+  let attemptedCount = 0;
   let rateLimited = false;
+  let consecutive429Count = 0;
 
   for (let i = 0; i < targetRows.length; i += 1) {
     if (i > 0 && process.env.NODE_ENV !== "test" && backfillDelayMs > 0) {
@@ -453,12 +465,13 @@ async function backfillProminentRowsWithYelpData(
     }
     const restaurant = targetRows[i];
     let yelpData: Restaurant["yelp"] | null = null;
-    let hitRateLimit = false;
+    let stillRateLimited = false;
+    attemptedCount += 1;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       yelpData = await findYelpDataForProminentRestaurant(city, restaurant, yelpApiKey);
       if (yelpData !== (YELP_RATE_LIMITED_SENTINEL as unknown)) break;
-      hitRateLimit = true;
+      stillRateLimited = true;
 
       // Deployed traffic can spike into transient 429s. Retry once with cooldown
       // before giving up and stopping backfill for this request.
@@ -467,15 +480,27 @@ async function backfillProminentRowsWithYelpData(
       }
     }
 
-    if (hitRateLimit && yelpData === (YELP_RATE_LIMITED_SENTINEL as unknown)) {
+    if (stillRateLimited && yelpData === (YELP_RATE_LIMITED_SENTINEL as unknown)) {
+      consecutive429Count += 1;
       rateLimited = true;
-      devLog("[prominent-yelp] rate-limited, stopping backfill", {
-        city,
-        completed: i,
-        remaining: targetRows.length - i,
-      });
-      break;
+      if (!isLocal && process.env.NODE_ENV !== "test" && rateLimitRetryDelayMs > 0) {
+        // Exponential-style cooldown between rate-limited rows to recover capacity.
+        const multiplier = Math.min(4, consecutive429Count);
+        await new Promise((resolve) => setTimeout(resolve, rateLimitRetryDelayMs * multiplier));
+      }
+      if (consecutive429Count >= maxConsecutive429) {
+        devLog("[prominent-yelp] rate-limited, stopping backfill", {
+          city,
+          attempted: attemptedCount,
+          remaining: targetRows.length - (i + 1),
+          consecutive_429: consecutive429Count,
+        });
+        break;
+      }
+      continue;
     }
+
+    consecutive429Count = 0;
     if (!yelpData) continue;
     restaurant.yelp = yelpData;
     backfilledCount += 1;
@@ -483,7 +508,7 @@ async function backfillProminentRowsWithYelpData(
 
   devLog("[prominent-yelp] done", {
     city,
-    attempted: rateLimited ? backfilledCount : targetRows.length,
+    attempted: attemptedCount,
     matched: backfilledCount,
     skipped: prominentRows.length - targetRows.length,
     rate_limited: rateLimited,
