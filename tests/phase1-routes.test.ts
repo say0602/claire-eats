@@ -507,6 +507,115 @@ describe("search orchestrator", () => {
     expect(prominentRow.yelp.address).toBe("175 2nd St, San Francisco, CA 94105");
   });
 
+  it("retries prominent Yelp backfill once on 429", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    let backfillLookupAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Existing Yelp Row",
+              city: "San Francisco",
+              yelp: {
+                rating: 4.5,
+                review_count: 1200,
+                price: "$$",
+                categories: ["Seafood"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.6,
+            review_count: 800,
+            place_id: "existing-google-place",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:existing-google-place",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({
+          places: [
+            {
+              id: "prominent-poboys",
+              displayName: { text: "PoBoys Kitchin" },
+              rating: 4.7,
+              userRatingCount: 900,
+              location: { latitude: 37.781, longitude: -122.409 },
+              formattedAddress: "175 2nd St, San Francisco, CA 94105",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        backfillLookupAttempts += 1;
+        if (backfillLookupAttempts === 1) {
+          return new Response(
+            JSON.stringify({
+              error: { code: "TOO_MANY_REQUESTS_PER_SECOND", description: "Rate limit exceeded" },
+            }),
+            { status: 429, headers: { "content-type": "application/json" } },
+          );
+        }
+
+        return Response.json({
+          businesses: [
+            {
+              name: "Po'Boys Kitchin",
+              rating: 4.4,
+              review_count: 321,
+              price: "$$",
+              categories: [{ title: "Cajun/Creole" }],
+              coordinates: { latitude: 37.7811, longitude: -122.4092 },
+              location: {
+                address1: "175 2nd St",
+                zip_code: "94105",
+                display_address: ["175 2nd St", "San Francisco, CA 94105"],
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    const prominentRow = payload.restaurants.find((restaurant: { name: string }) => restaurant.name === "PoBoys Kitchin");
+    expect(prominentRow).toBeTruthy();
+    expect(prominentRow.yelp.rating).toBe(4.4);
+    expect(prominentRow.yelp.review_count).toBe(321);
+    expect(backfillLookupAttempts).toBe(2);
+  });
+
   it("caps normal-mode merged output at 80 rows", async () => {
     process.env.YELP_API_KEY = "test-key";
     process.env.GOOGLE_MAPS_API_KEY = "test-key";

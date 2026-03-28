@@ -41,8 +41,10 @@ const GOOGLE_TYPE_SKIP = new Set(["point_of_interest", "establishment", "food", 
 const YELP_PROMINENT_MATCH_DISTANCE_METERS = 500;
 const YELP_PROMINENT_REQUEST_TIMEOUT_MS = 1200;
 const YELP_PROMINENT_LOOKUP_LIMIT_LOCAL = 30;
-const YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT = 20;
-const YELP_PROMINENT_BACKFILL_DELAY_MS = 120;
+const YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT = 30;
+const YELP_PROMINENT_BACKFILL_DELAY_MS_LOCAL = 120;
+const YELP_PROMINENT_BACKFILL_DELAY_MS_DEPLOYED_DEFAULT = 350;
+const YELP_PROMINENT_RATE_LIMIT_RETRY_DELAY_MS_DEPLOYED_DEFAULT = 1500;
 const YELP_RATE_LIMITED_SENTINEL = Symbol("YELP_RATE_LIMITED");
 
 function devLog(...args: unknown[]) {
@@ -219,6 +221,29 @@ function getDeployedProminentLookupLimit() {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT;
   return Math.max(0, Math.floor(parsed));
+}
+
+function parseNonNegativeIntegerEnv(raw: string | undefined, fallback: number) {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.floor(parsed));
+}
+
+function getProminentBackfillDelayMs(isLocal: boolean) {
+  if (isLocal) return YELP_PROMINENT_BACKFILL_DELAY_MS_LOCAL;
+  return parseNonNegativeIntegerEnv(
+    process.env.YELP_PROMINENT_BACKFILL_DELAY_MS_DEPLOYED,
+    YELP_PROMINENT_BACKFILL_DELAY_MS_DEPLOYED_DEFAULT,
+  );
+}
+
+function getProminentRateLimitRetryDelayMs(isLocal: boolean) {
+  if (isLocal) return 0;
+  return parseNonNegativeIntegerEnv(
+    process.env.YELP_PROMINENT_RATE_LIMIT_RETRY_DELAY_MS_DEPLOYED,
+    YELP_PROMINENT_RATE_LIMIT_RETRY_DELAY_MS_DEPLOYED_DEFAULT,
+  );
 }
 
 async function fetchGoogleEnrichment(
@@ -414,6 +439,8 @@ async function backfillProminentRowsWithYelpData(
   }
 
   const lookupLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : getDeployedProminentLookupLimit();
+  const backfillDelayMs = getProminentBackfillDelayMs(isLocal);
+  const rateLimitRetryDelayMs = getProminentRateLimitRetryDelayMs(isLocal);
   const targetRows = prominentRows.slice(0, Math.min(lookupLimit, prominentRows.length));
   if (targetRows.length === 0) return;
 
@@ -421,12 +448,26 @@ async function backfillProminentRowsWithYelpData(
   let rateLimited = false;
 
   for (let i = 0; i < targetRows.length; i += 1) {
-    if (i > 0 && process.env.NODE_ENV !== "test") {
-      await new Promise((resolve) => setTimeout(resolve, YELP_PROMINENT_BACKFILL_DELAY_MS));
+    if (i > 0 && process.env.NODE_ENV !== "test" && backfillDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, backfillDelayMs));
     }
     const restaurant = targetRows[i];
-    const yelpData = await findYelpDataForProminentRestaurant(city, restaurant, yelpApiKey);
-    if (yelpData === (YELP_RATE_LIMITED_SENTINEL as unknown)) {
+    let yelpData: Restaurant["yelp"] | null = null;
+    let hitRateLimit = false;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      yelpData = await findYelpDataForProminentRestaurant(city, restaurant, yelpApiKey);
+      if (yelpData !== (YELP_RATE_LIMITED_SENTINEL as unknown)) break;
+      hitRateLimit = true;
+
+      // Deployed traffic can spike into transient 429s. Retry once with cooldown
+      // before giving up and stopping backfill for this request.
+      if (attempt === 0 && process.env.NODE_ENV !== "test" && rateLimitRetryDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, rateLimitRetryDelayMs));
+      }
+    }
+
+    if (hitRateLimit && yelpData === (YELP_RATE_LIMITED_SENTINEL as unknown)) {
       rateLimited = true;
       devLog("[prominent-yelp] rate-limited, stopping backfill", {
         city,
