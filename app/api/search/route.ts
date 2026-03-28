@@ -138,25 +138,37 @@ async function fetchGoogleEnrichment(
   body: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<Response> {
-  try {
-    const response = await fetch(`${origin}/api/google`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal,
-      cache: "no-store",
-    });
-    if (response.ok) return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") throw error;
+  const jsonBody = JSON.stringify(body);
+  const hostname = new URL(origin).hostname;
+  const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0";
+
+  // Deployed environments use direct handler invocation to avoid internal
+  // self-fetch subrequests that count against platform limits (e.g. Cloudflare
+  // Workers charge 2 subrequests per enrichment row when using self-fetch:
+  // one for /api/google, one for the outbound maps.googleapis.com call).
+  if (!isLocal) {
+    try {
+      return await googlePost(
+        new Request("http://internal/api/google", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: jsonBody,
+        }),
+      );
+    } catch {
+      // Fall through to self-fetch as last resort.
+    }
   }
-  return googlePost(
-    new Request("http://internal/api/google", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+
+  // Local dev and tests use self-fetch (compatible with fetch mock infrastructure).
+  // Also serves as fallback if direct invocation throws in deployed environments.
+  return fetch(`${origin}/api/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: jsonBody,
+    signal,
+    cache: "no-store",
+  });
 }
 
 function roundMetric(value: number) {
