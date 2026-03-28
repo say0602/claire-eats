@@ -824,6 +824,80 @@ describe("search orchestrator", () => {
     expect(payload.restaurants[0].google.place_id).toBe("recovered-google");
   });
 
+  it("recovers when internal Yelp self-fetch returns non-OK", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return new Response(
+          JSON.stringify({
+            error: { code: "YELP_UPSTREAM_ERROR", message: "Self-fetch internal proxy failed." },
+          }),
+          {
+            status: 502,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        return Response.json({
+          businesses: [
+            {
+              id: "y2",
+              name: "Recovered Non-OK Yelp Row",
+              rating: 4.2,
+              review_count: 2100,
+              price: "$$",
+              categories: [{ title: "Seafood" }],
+              coordinates: { latitude: 37.79, longitude: -122.39 },
+              location: {
+                address1: "456 Recovery Ave",
+                zip_code: "94105",
+                display_address: ["456 Recovery Ave", "San Francisco, CA 94105"],
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.4,
+            review_count: 1700,
+            place_id: "recovered-non-ok-google",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:recovered-non-ok-google",
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).not.toBe(true);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].id).toBe("y2");
+    expect(payload.restaurants[0].yelp.review_count).toBe(2100);
+    expect(payload.restaurants[0].google.place_id).toBe("recovered-non-ok-google");
+  });
+
   it("returns empty with warning when Yelp returns zero and Google also fails", async () => {
     process.env.YELP_API_KEY = "test-key";
     process.env.GOOGLE_MAPS_API_KEY = "test-key";

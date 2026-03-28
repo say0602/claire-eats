@@ -5,6 +5,7 @@ import { buildMapsUrl, rejectGoogleEnrichment } from "@/lib/matching";
 import { matchMichelinForRestaurant } from "@/lib/michelin";
 import { computeCombinedScores } from "@/lib/scoring";
 import { POST as yelpPost } from "@/app/api/yelp/route";
+import { POST as googlePost } from "@/app/api/google/route";
 
 const MAX_GOOGLE_ENRICHMENTS = 50;
 const GOOGLE_CONCURRENCY = 5;
@@ -130,6 +131,32 @@ function warningMessage(code: WarningCode) {
 
 function hasGoogleData(google: Restaurant["google"]) {
   return google.place_id !== null || google.rating !== null || google.review_count !== null;
+}
+
+async function fetchGoogleEnrichment(
+  origin: string,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Response> {
+  try {
+    const response = await fetch(`${origin}/api/google`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+      cache: "no-store",
+    });
+    if (response.ok) return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+  }
+  return googlePost(
+    new Request("http://internal/api/google", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 function roundMetric(value: number) {
@@ -320,10 +347,11 @@ export async function POST(request: Request) {
   }
 
   const origin = new URL(request.url).origin;
-  let yelpResponse: Response;
+  let yelpResponse: Response | null = null;
   let yelpMs: number | null = null;
   let yelpStatus = "unknown";
   const yelpStartedAtMs = Date.now();
+
   try {
     yelpResponse = await fetch(`${origin}/api/yelp`, {
       method: "POST",
@@ -334,21 +362,33 @@ export async function POST(request: Request) {
     yelpMs = Date.now() - yelpStartedAtMs;
     yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
   } catch {
-    // Cloudflare Worker deployments can fail self-fetch to same origin route handlers.
-    // Fallback to direct route handler invocation before switching to Google-only mode.
+    // Self-fetch can fail on certain platforms (e.g. Cloudflare Workers).
+  }
+
+  // Recovery: when self-fetch threw or returned non-OK, try direct handler invocation.
+  if (!yelpResponse || !yelpResponse.ok) {
     try {
-      yelpResponse = await yelpPost(
+      const directResponse = await yelpPost(
         new Request("http://internal/api/yelp", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ city }),
         }),
       );
-      yelpMs = Date.now() - yelpStartedAtMs;
-      yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
+      if (directResponse.ok) {
+        yelpResponse = directResponse;
+        yelpMs = Date.now() - yelpStartedAtMs;
+        yelpStatus = "ok";
+      } else if (!yelpResponse) {
+        yelpResponse = directResponse;
+        yelpMs = Date.now() - yelpStartedAtMs;
+        yelpStatus = `http_${directResponse.status}`;
+      }
     } catch {
-      yelpStatus = "network_error";
-      return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+      if (!yelpResponse) {
+        yelpStatus = "network_error";
+        return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+      }
     }
   }
 
@@ -420,20 +460,14 @@ export async function POST(request: Request) {
       googleAttempted += 1;
 
       try {
-        const googleResponse = await fetch(`${origin}/api/google`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: restaurant.name,
-            city,
-            lat: restaurant.yelp.lat,
-            lng: restaurant.yelp.lng,
-            address: restaurant.yelp.address ?? null,
-            postal_code: restaurant.yelp.postal_code ?? null,
-          }),
-          signal: timeout.signal,
-          cache: "no-store",
-        });
+        const googleResponse = await fetchGoogleEnrichment(origin, {
+          name: restaurant.name,
+          city,
+          lat: restaurant.yelp.lat,
+          lng: restaurant.yelp.lng,
+          address: restaurant.yelp.address ?? null,
+          postal_code: restaurant.yelp.postal_code ?? null,
+        }, timeout.signal);
 
         if (!googleResponse.ok) {
           warningCodes.add("GOOGLE_UPSTREAM_ERROR");
