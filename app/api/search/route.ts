@@ -41,7 +41,7 @@ const GOOGLE_TYPE_SKIP = new Set(["point_of_interest", "establishment", "food", 
 const YELP_PROMINENT_MATCH_DISTANCE_METERS = 500;
 const YELP_PROMINENT_REQUEST_TIMEOUT_MS = 1200;
 const YELP_PROMINENT_LOOKUP_LIMIT_LOCAL = 30;
-const YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED = 0;
+const YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT = 20;
 const YELP_PROMINENT_BACKFILL_DELAY_MS = 120;
 const YELP_RATE_LIMITED_SENTINEL = Symbol("YELP_RATE_LIMITED");
 
@@ -211,6 +211,14 @@ function hasGoogleData(google: Restaurant["google"]) {
 function isLocalOrigin(origin: string) {
   const hostname = new URL(origin).hostname;
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0";
+}
+
+function getDeployedProminentLookupLimit() {
+  const raw = process.env.YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED;
+  if (!raw) return YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED_DEFAULT;
+  return Math.max(0, Math.floor(parsed));
 }
 
 async function fetchGoogleEnrichment(
@@ -405,7 +413,7 @@ async function backfillProminentRowsWithYelpData(
     return;
   }
 
-  const lookupLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : YELP_PROMINENT_LOOKUP_LIMIT_DEPLOYED;
+  const lookupLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : getDeployedProminentLookupLimit();
   const targetRows = prominentRows.slice(0, Math.min(lookupLimit, prominentRows.length));
   if (targetRows.length === 0) return;
 
