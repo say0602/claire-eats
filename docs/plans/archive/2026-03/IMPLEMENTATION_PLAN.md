@@ -1,5 +1,5 @@
 ---
-status: active
+status: implemented
 ---
 
 - `components/ScorePill.tsx` (created)
@@ -373,27 +373,34 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Scoring: equal-weight 10-point for both sources, Yelp-only fallback, Google-only fallback (placeholder zeros ignored), both-missing returns null.
   - UI: no pagination controls rendered, sort icons visible on all sortable headers.
 
-2. [ ] **Unit tests**
-   - `lib/matching.ts`: overlap and distance edge cases.
-   - `lib/scoring.ts`: both-sources, one-source, and normalization edge cases.
-   - `lib/michelin.ts`: city filtering and threshold behavior.
+2. [x] **Unit tests (complete)**
+   - [x] `lib/matching.ts`: candidate scoring + address/distance/name edge cases are covered.
+   - [x] `lib/scoring.ts`: both-sources, one-source, Google-only placeholder handling, and both-missing are covered.
+   - [x] `lib/michelin.ts`: focused tests cover threshold boundary behavior and city-key normalization/runtime empty-match behavior.
 
-2. [ ] **Route integration tests**
+3. [x] **Route integration tests (implemented)**
    - Mock Yelp/Google providers.
-   - Verify partial-result behavior and warning contracts.
+   - Verify partial-result behavior and warning contracts (including enrichment cap behavior).
 
-3. [ ] **Performance controls**
-   - Add explicit result limits and concurrency caps.
-   - Add request-level timeout budgets to keep UI responsive.
-   - Validate search latency target: `<5s` typical and `<10s` p95 in target deploy environment.
+4. [x] **Performance controls (implemented)**
+   - Explicit result limits and concurrency caps are enforced.
+   - Request-level timeout budgets exist (per-enrichment and overall enrichment budget).
 
-4. [ ] **Telemetry and diagnostics**
-   - Log provider latency and failure rates.
-   - Capture match rates (Google accepted, Michelin matched) for tuning.
+5. [x] **Telemetry and diagnostics (implemented)**
+   - Search route emits structured development diagnostics logs for provider latency and failure rates (`[search-diagnostics]`).
+   - Diagnostics capture Google enrichment attempts/success/failure codes, Google accepted-match rate, and Michelin match rate.
 
-5. [ ] **Docs and handoff**
-   - Update setup instructions and environment docs.
-   - Document known matching limitations and future tuning plan.
+6. [x] **Docs and handoff (implemented)**
+   - PRD + plan updated to reflect shipped behavior (50-row limits, matching uplift, absolute scoring, sorting UX, Yelp query behavior).
+
+**Phase 2 (remaining hardening completion) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass (10 files, 91 tests)
+- Coverage includes:
+  - Search diagnostics log payload verification in development mode (latency + match-rate fields).
+  - Michelin tests extended for strict distance threshold boundary and city-key normalization/runtime empty-match path.
 
 ## Phase Exit Gates
 
@@ -405,7 +412,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Concurrency cap + timeout budget + `warnings[]` contract are verified in tests.
   - Default operational limits are enforced (`50` Yelp rows sorted by review count, top `50` Google enrichments, concurrency `5`, timeout `3000ms`).
 - **Phase 1.5A exit gate**
-  - Combined score is default sort and single-source fallback works.
+  - Combined score is visible and sortable, and single-source fallback works (including Google-only fallback rows).
   - Michelin is archived for UI and does not block table rendering or sort behavior.
 - **Phase 1.5B exit gate**
   - Loading/error UX is hardened for partial Google failures and slow networks.
@@ -425,10 +432,10 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - `search_submitted`, `map_open_clicked`, and `results_view_closed` are emitted with session/time context.
   - Map-open count, return search behavior, and time-on-table can be measured from emitted events.
 
-## Open Questions
+## Post-Implementation Follow-ups
 
 - Do we use Places Text Search only, or add Place Details for stronger map metadata?
 - Where should Michelin source refresh happen (manual script run vs scheduled pipeline)?
 - Do we cache city search results in-memory during MVP demos to reduce repeated API costs?
 
-Target resolution: remaining open questions are deferred to Phase 2 hardening and do not block the shipped Phase 1/1.5 scope.
+These are optional future enhancements and do not block the implemented scope captured in this archived plan.

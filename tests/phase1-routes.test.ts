@@ -798,6 +798,127 @@ describe("search orchestrator", () => {
     ]);
   });
 
+  it("emits fallback diagnostics with failure counts in development mode", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "Nowhere",
+          restaurants: [],
+        });
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return new Response("error", { status: 500 });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Nowhere" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    expect(response.status).toBe(200);
+
+    expect(diagnosticsSpy).toHaveBeenCalledWith(
+      "[search-diagnostics]",
+      expect.objectContaining({
+        mode: "google_fallback",
+        city: "Nowhere",
+        google_rows_attempted: 0,
+        google_rows_response_ok: 0,
+        google_rows_accepted: 0,
+        google_enrichment_failures: {
+          GOOGLE_UPSTREAM_ERROR: 1,
+        },
+      }),
+    );
+  });
+
+  it("emits diagnostics logs in development with match rates and latencies", async () => {
+    process.env.NODE_ENV = "development";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Restaurant One",
+              city: "San Francisco",
+              yelp: {
+                rating: 4.5,
+                review_count: 200,
+                price: "$$",
+                categories: ["American"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.7,
+            review_count: 600,
+            place_id: "google-1",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:google-1",
+          },
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    expect(response.status).toBe(200);
+
+    expect(diagnosticsSpy).toHaveBeenCalledWith(
+      "[search-diagnostics]",
+      expect.objectContaining({
+        mode: "yelp_primary",
+        city: "San Francisco",
+        yelp_status: "ok",
+        google_rows_attempted: 1,
+        google_rows_response_ok: 1,
+        google_rows_accepted: 1,
+      }),
+    );
+
+    const diagnosticsPayload = diagnosticsSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(typeof diagnosticsPayload.total_ms).toBe("number");
+    expect(typeof diagnosticsPayload.google_ms).toBe("number");
+    expect(diagnosticsPayload.google_match_rate).toBe(1);
+  });
+
   it("treats malformed google payloads as upstream warning while keeping rows", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

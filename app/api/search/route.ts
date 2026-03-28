@@ -44,6 +44,22 @@ type GoogleRouteFallback = {
   google: Restaurant["google"];
 };
 
+type SearchDiagnostics = {
+  mode: "yelp_primary" | "google_fallback" | "yelp_error";
+  city: string;
+  total_ms: number;
+  yelp_status: string;
+  yelp_ms: number | null;
+  google_ms: number | null;
+  google_rows_attempted: number;
+  google_rows_response_ok: number;
+  google_rows_accepted: number;
+  google_enrichment_failures: Record<string, number>;
+  google_match_rate: number | null;
+  michelin_match_rate: number | null;
+  warning_codes: WarningCode[];
+};
+
 function isGoogleRecord(value: unknown): value is Restaurant["google"] {
   if (!value || typeof value !== "object") return false;
   const google = value as Record<string, unknown>;
@@ -109,6 +125,32 @@ function warningMessage(code: WarningCode) {
     default:
       return "Enrichment warning.";
   }
+}
+
+function hasGoogleData(google: Restaurant["google"]) {
+  return google.place_id !== null || google.rating !== null || google.review_count !== null;
+}
+
+function roundMetric(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function ratioOrNull(numerator: number, denominator: number) {
+  if (denominator <= 0) return null;
+  return roundMetric(numerator / denominator);
+}
+
+function countWarningCodes(warnings: SearchWarning[]) {
+  const counts: Record<string, number> = {};
+  for (const warning of warnings) {
+    counts[warning.code] = (counts[warning.code] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function logSearchDiagnostics(diagnostics: SearchDiagnostics) {
+  if (process.env.NODE_ENV !== "development") return;
+  console.info("[search-diagnostics]", diagnostics);
 }
 
 function buildRestaurantFromSeed(seed: YelpSeed): Restaurant {
@@ -220,9 +262,34 @@ async function fetchGoogleFallbackRows(city: string): Promise<{ restaurants: Res
   }
 }
 
-async function googleOnlyFallback(city: string) {
+async function googleOnlyFallback(
+  city: string,
+  context: { requestStartedAtMs: number; yelpStatus: string; yelpMs: number | null },
+) {
+  const googleStartedAtMs = Date.now();
   const fallback = await fetchGoogleFallbackRows(city);
+  const googleMs = Date.now() - googleStartedAtMs;
   const scored = computeCombinedScores(fallback.restaurants);
+  const accepted = scored.filter((restaurant) => hasGoogleData(restaurant.google)).length;
+  const warningCodes = fallback.warnings.map((warning) => warning.code);
+  const fallbackFailureCounts = countWarningCodes(fallback.warnings);
+
+  logSearchDiagnostics({
+    mode: "google_fallback",
+    city,
+    total_ms: Date.now() - context.requestStartedAtMs,
+    yelp_status: context.yelpStatus,
+    yelp_ms: context.yelpMs,
+    google_ms: googleMs,
+    google_rows_attempted: scored.length,
+    google_rows_response_ok: scored.length,
+    google_rows_accepted: accepted,
+    google_enrichment_failures: fallbackFailureCounts,
+    google_match_rate: ratioOrNull(accepted, scored.length),
+    michelin_match_rate: null,
+    warning_codes: warningCodes,
+  });
+
   const response: SearchResponseSuccess = {
     city,
     restaurants: scored,
@@ -233,6 +300,7 @@ async function googleOnlyFallback(city: string) {
 }
 
 export async function POST(request: Request) {
+  const requestStartedAtMs = Date.now();
   let city = "";
   try {
     const body = await request.json();
@@ -252,15 +320,21 @@ export async function POST(request: Request) {
 
   const origin = new URL(request.url).origin;
   let yelpResponse: Response;
+  let yelpMs: number | null = null;
+  let yelpStatus = "unknown";
   try {
+    const yelpStartedAtMs = Date.now();
     yelpResponse = await fetch(`${origin}/api/yelp`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ city }),
       cache: "no-store",
     });
+    yelpMs = Date.now() - yelpStartedAtMs;
+    yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
   } catch {
-    return googleOnlyFallback(city);
+    yelpStatus = "network_error";
+    return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
   }
 
   if (!yelpResponse.ok) {
@@ -277,22 +351,41 @@ export async function POST(request: Request) {
           : code === "YELP_RATE_LIMITED"
             ? 429
             : 504;
+      logSearchDiagnostics({
+        mode: "yelp_error",
+        city,
+        total_ms: Date.now() - requestStartedAtMs,
+        yelp_status: code,
+        yelp_ms: yelpMs,
+        google_ms: null,
+        google_rows_attempted: 0,
+        google_rows_response_ok: 0,
+        google_rows_accepted: 0,
+        google_enrichment_failures: {},
+        google_match_rate: null,
+        michelin_match_rate: null,
+        warning_codes: [],
+      });
       return NextResponse.json(failureEnvelope(city, code, message), { status });
     }
 
-    return googleOnlyFallback(city);
+    return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus: code, yelpMs });
   }
 
   const yelpPayload = (await yelpResponse.json()) as { city: string; restaurants: YelpSeed[] };
   const restaurants = yelpPayload.restaurants.map((seed) => buildRestaurantFromSeed(seed));
 
   if (restaurants.length === 0) {
-    return googleOnlyFallback(city);
+    return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus: "zero_results", yelpMs });
   }
 
   const targetCount = Math.min(restaurants.length, MAX_GOOGLE_ENRICHMENTS);
 
   const warningCodes = new Set<WarningCode>();
+  const googleFailureCodes: Record<string, number> = {};
+  let googleAttempted = 0;
+  let googleSucceeded = 0;
+  let googleLatencyTotalMs = 0;
   const enrichmentDeadlineMs = Date.now() + ENRICHMENT_BUDGET_MS;
 
   let cursor = 0;
@@ -308,6 +401,8 @@ export async function POST(request: Request) {
 
       const restaurant = restaurants[index];
       const timeout = withTimeout(GOOGLE_REQUEST_TIMEOUT_MS);
+      const googleStartedAtMs = Date.now();
+      googleAttempted += 1;
 
       try {
         const googleResponse = await fetch(`${origin}/api/google`, {
@@ -327,28 +422,35 @@ export async function POST(request: Request) {
 
         if (!googleResponse.ok) {
           warningCodes.add("GOOGLE_UPSTREAM_ERROR");
+          googleFailureCodes.GOOGLE_UPSTREAM_ERROR = (googleFailureCodes.GOOGLE_UPSTREAM_ERROR ?? 0) + 1;
           continue;
         }
 
         const googlePayload = await googleResponse.json();
         if (!isGoogleRoutePayload(googlePayload)) {
           warningCodes.add("GOOGLE_UPSTREAM_ERROR");
+          googleFailureCodes.GOOGLE_UPSTREAM_ERROR = (googleFailureCodes.GOOGLE_UPSTREAM_ERROR ?? 0) + 1;
           continue;
         }
 
         if (googlePayload.ok) {
+          googleSucceeded += 1;
           restaurant.google = googlePayload.google;
         } else {
           restaurant.google = googlePayload.google;
           warningCodes.add(googlePayload.code);
+          googleFailureCodes[googlePayload.code] = (googleFailureCodes[googlePayload.code] ?? 0) + 1;
         }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           warningCodes.add("GOOGLE_TIMEOUT");
+          googleFailureCodes.GOOGLE_TIMEOUT = (googleFailureCodes.GOOGLE_TIMEOUT ?? 0) + 1;
         } else {
           warningCodes.add("GOOGLE_UPSTREAM_ERROR");
+          googleFailureCodes.GOOGLE_UPSTREAM_ERROR = (googleFailureCodes.GOOGLE_UPSTREAM_ERROR ?? 0) + 1;
         }
       } finally {
+        googleLatencyTotalMs += Date.now() - googleStartedAtMs;
         timeout.clear();
       }
     }
@@ -366,6 +468,10 @@ export async function POST(request: Request) {
   }));
 
   const scoredRestaurants = computeCombinedScores(restaurantsWithMichelin);
+  const googleAccepted = restaurants
+    .slice(0, targetCount)
+    .filter((restaurant) => hasGoogleData(restaurant.google)).length;
+  const michelinMatchedCount = restaurantsWithMichelin.filter((restaurant) => restaurant.michelin.matched).length;
 
   if (warningCodes.size > 0) {
     warningCodes.add("PARTIAL_ENRICHMENT");
@@ -384,6 +490,22 @@ export async function POST(request: Request) {
       code,
       message: warningMessage(code),
     }));
+
+  logSearchDiagnostics({
+    mode: "yelp_primary",
+    city,
+    total_ms: Date.now() - requestStartedAtMs,
+    yelp_status: yelpStatus,
+    yelp_ms: yelpMs,
+    google_ms: googleAttempted > 0 ? roundMetric(googleLatencyTotalMs / googleAttempted) : null,
+    google_rows_attempted: googleAttempted,
+    google_rows_response_ok: googleSucceeded,
+    google_rows_accepted: googleAccepted,
+    google_enrichment_failures: googleFailureCodes,
+    google_match_rate: ratioOrNull(googleAccepted, googleAttempted),
+    michelin_match_rate: ratioOrNull(michelinMatchedCount, restaurantsWithMichelin.length),
+    warning_codes: warnings.map((warning) => warning.code),
+  });
 
   const response: SearchResponseSuccess = {
     city,
