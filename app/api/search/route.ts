@@ -12,6 +12,7 @@ const GOOGLE_CONCURRENCY = 5;
 const GOOGLE_REQUEST_TIMEOUT_MS = 3000;
 const ENRICHMENT_BUDGET_MS =
   Math.ceil((MAX_GOOGLE_ENRICHMENTS / GOOGLE_CONCURRENCY) * GOOGLE_REQUEST_TIMEOUT_MS) + 1000;
+const DEPLOYED_MAX_GOOGLE_ENRICHMENTS = 49;
 const GOOGLE_FALLBACK_LIMIT = 20;
 const GOOGLE_FALLBACK_TIMEOUT_MS = 5000;
 const GOOGLE_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json";
@@ -133,14 +134,18 @@ function hasGoogleData(google: Restaurant["google"]) {
   return google.place_id !== null || google.rating !== null || google.review_count !== null;
 }
 
+function isLocalOrigin(origin: string) {
+  const hostname = new URL(origin).hostname;
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0";
+}
+
 async function fetchGoogleEnrichment(
   origin: string,
   body: Record<string, unknown>,
   signal: AbortSignal,
 ): Promise<Response> {
   const jsonBody = JSON.stringify(body);
-  const hostname = new URL(origin).hostname;
-  const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0";
+  const isLocal = isLocalOrigin(origin);
 
   // Deployed environments use direct handler invocation to avoid internal
   // self-fetch subrequests that count against platform limits (e.g. Cloudflare
@@ -359,45 +364,78 @@ export async function POST(request: Request) {
   }
 
   const origin = new URL(request.url).origin;
+  const isLocal = isLocalOrigin(origin);
   let yelpResponse: Response | null = null;
   let yelpMs: number | null = null;
   let yelpStatus = "unknown";
   const yelpStartedAtMs = Date.now();
+  const yelpRequestBody = JSON.stringify({ city });
 
-  try {
-    yelpResponse = await fetch(`${origin}/api/yelp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ city }),
-      cache: "no-store",
-    });
-    yelpMs = Date.now() - yelpStartedAtMs;
-    yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
-  } catch {
-    // Self-fetch can fail on certain platforms (e.g. Cloudflare Workers).
-  }
-
-  // Recovery: when self-fetch threw or returned non-OK, try direct handler invocation.
-  if (!yelpResponse || !yelpResponse.ok) {
+  if (isLocal) {
     try {
-      const directResponse = await yelpPost(
+      yelpResponse = await fetch(`${origin}/api/yelp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: yelpRequestBody,
+        cache: "no-store",
+      });
+      yelpMs = Date.now() - yelpStartedAtMs;
+      yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
+    } catch {
+      // Fall through to direct invocation below.
+    }
+
+    if (!yelpResponse || !yelpResponse.ok) {
+      try {
+        const directResponse = await yelpPost(
+          new Request("http://internal/api/yelp", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: yelpRequestBody,
+          }),
+        );
+        if (directResponse.ok) {
+          yelpResponse = directResponse;
+          yelpMs = Date.now() - yelpStartedAtMs;
+          yelpStatus = "ok";
+        } else if (!yelpResponse) {
+          yelpResponse = directResponse;
+          yelpMs = Date.now() - yelpStartedAtMs;
+          yelpStatus = `http_${directResponse.status}`;
+        }
+      } catch {
+        if (!yelpResponse) {
+          yelpStatus = "network_error";
+          return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
+        }
+      }
+    }
+  } else {
+    try {
+      yelpResponse = await yelpPost(
         new Request("http://internal/api/yelp", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ city }),
+          body: yelpRequestBody,
         }),
       );
-      if (directResponse.ok) {
-        yelpResponse = directResponse;
-        yelpMs = Date.now() - yelpStartedAtMs;
-        yelpStatus = "ok";
-      } else if (!yelpResponse) {
-        yelpResponse = directResponse;
-        yelpMs = Date.now() - yelpStartedAtMs;
-        yelpStatus = `http_${directResponse.status}`;
-      }
+      yelpMs = Date.now() - yelpStartedAtMs;
+      yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
     } catch {
-      if (!yelpResponse) {
+      // Fall through to self-fetch below if direct invocation fails.
+    }
+
+    if (!yelpResponse) {
+      try {
+        yelpResponse = await fetch(`${origin}/api/yelp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: yelpRequestBody,
+          cache: "no-store",
+        });
+        yelpMs = Date.now() - yelpStartedAtMs;
+        yelpStatus = yelpResponse.ok ? "ok" : `http_${yelpResponse.status}`;
+      } catch {
         yelpStatus = "network_error";
         return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus, yelpMs });
       }
@@ -446,7 +484,8 @@ export async function POST(request: Request) {
     return googleOnlyFallback(city, { requestStartedAtMs, yelpStatus: "zero_results", yelpMs });
   }
 
-  const targetCount = Math.min(restaurants.length, MAX_GOOGLE_ENRICHMENTS);
+  const maxGoogleEnrichments = isLocal ? MAX_GOOGLE_ENRICHMENTS : DEPLOYED_MAX_GOOGLE_ENRICHMENTS;
+  const targetCount = Math.min(restaurants.length, maxGoogleEnrichments);
 
   const warningCodes = new Set<WarningCode>();
   const googleFailureCodes: Record<string, number> = {};
