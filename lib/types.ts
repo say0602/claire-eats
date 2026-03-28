@@ -42,6 +42,7 @@ export type SearchResponseSuccess = {
   city: string;
   restaurants: Restaurant[];
   warnings: SearchWarning[];
+  google_only?: boolean;
 };
 
 export type SearchResponseFailure = {

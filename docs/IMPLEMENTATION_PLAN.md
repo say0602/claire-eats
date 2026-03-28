@@ -17,6 +17,7 @@ Build and ship the first working version of Claire Eats as a table-first restaur
 - User enters a city.
 - System fetches Yelp restaurants as the primary list.
 - System enriches each result with Google Places (best-effort).
+- If Yelp returns zero rows for a city (or non-hard-fail coverage/location errors), system may show Google-only fallback rows with explicit labeling.
 - UI shows one sortable comparison table with map deep-links.
 
 The MVP target is a usable, reliable workflow in one week. Phase 1.5 then adds the highest-value quality boost (combined score default sort + better loading/error UX).
@@ -27,7 +28,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 
 - **PRD 5.1 City search** → Phase 1: `SearchBar` + `/api/search` input validation
 - **PRD 5.2 Yelp aggregation** → Phase 1: `/api/yelp` + normalization into shared `Restaurant` shape
-- **PRD 5.2 Google enrichment** → Phase 1: `/api/google` + best-effort enrichment of top N Yelp rows
+- **PRD 5.2 Google enrichment** → Phase 1: `/api/google` + best-effort enrichment of top N Yelp rows; Phase 1.5B: Google-only fallback mode when Yelp has no usable coverage (zero rows / non-hard-fail location errors)
 - **PRD 5.3 Matching logic** → Phase 1: `lib/matching.ts` (Google acceptance ~100m / overlap)
 - **PRD 5.4 Combined score** → Phase 1.5A: `lib/scoring.ts` + default sort by score
 - **PRD 5.5 Table view + 5.6 Sorting** → Phase 1: table with Yelp-first sorting; Phase 1.5A: add Score column + score sort becomes default
@@ -44,7 +45,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Treat Yelp/Google API quotas and latency as first-class constraints from MVP.
   - Use bounded concurrency, timeouts, and fallback behavior for 429/5xx failures.
 - **Yelp as canonical row source.**
-  - Yelp decides row inclusion; Google enriches existing rows.
+  - Yelp decides row inclusion by default; Google enriches existing rows.
+  - Exception: if Yelp returns zero rows or a non-hard-fail location/coverage error for a city, enable Google-only fallback mode with explicit UI labeling.
   - This guarantees stable rows even when enrichment providers fail.
 - **Coordinate-first matching strategy.**
   - Use Haversine threshold checks for Google acceptance where possible.
@@ -52,10 +54,11 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - **Partial data is a valid result.**
   - Missing Google fields render as empty values, never row deletion.
   - Users should always get usable output from a city search when Yelp succeeds.
+  - If Yelp has no coverage for a city, return a usable Google-only table rather than a hard empty state.
 - **Phase split mirrors PRD.**
   - Phase 1: core search + table + Yelp-first flow.
   - Phase 1.5A: combined score + score-first sorting.
-  - Phase 1.5B: loading/error UX + instrumentation for PRD metrics.
+  - Phase 1.5B: loading/error UX + Google-only fallback mode + instrumentation for PRD metrics.
 - **Operational defaults are explicit for MVP (tunable constants, not PRD requirements).**
   - Yelp result limit: `30` rows per city search.
   - Google enrichment: top `20` Yelp rows, max concurrency `5`.
@@ -268,11 +271,13 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 
 ### Phase 1.5B - UX + Measurement (Day 6-7)
 
-1. [ ] **UX hardening**
+1. [x] **UX hardening**
    - [x] Add city input suggestion dropdown to guide valid city formatting (custom filtered list in `SearchBar`).
-   - Improve loading skeleton and retry behavior.
-   - Better error copy for invalid city vs upstream API failures.
-   - Keep table stable during refetches to avoid jumpy UI.
+   - [x] Add Google-only fallback mode when Yelp returns zero rows or an error for a searched city.
+   - [x] Add explicit banner/copy when fallback mode is active (e.g., "Yelp has limited coverage here; showing Google-only results.").
+   - [x] Improve loading skeleton and retry behavior.
+   - [x] Better error copy for invalid city vs upstream API failures.
+   - [x] Keep table stable during refetches to avoid jumpy UI.
 
 **Phase 1.5B (UX hardening, city suggestions) verification snapshot (2026-03-24)**
 
@@ -284,7 +289,25 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Clicking a suggestion writes full city value into the input.
   - Dropdown closes on `Escape`.
 
-2. [ ] **Analytics instrumentation (PRD metrics)**
+**Phase 1.5B (Google-only fallback + UX) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass (9 files, 63 tests)
+- Implementation:
+  - `/api/search` detects Yelp returning zero rows, a location-level error (e.g. HTTP 400), **or** a network failure (fetch throws) and queries Google Places Text Search as fallback.
+  - Only hard failures (config errors, rate limits, timeouts) still return error envelopes.
+  - Response includes `google_only: true` flag so UI can render appropriate banner.
+  - Blue "Limited Yelp coverage" banner displayed when in Google-only mode (`aria-live="polite"` for screen readers).
+  - RestaurantTable shows "-" for Yelp rating/reviews/price columns in Google-only mode.
+  - Yelp sort buttons disabled in Google-only mode (meaningless data).
+  - Loading skeleton with animated pulse bars replaces plain text spinner.
+  - Empty-state copy is context-aware: shows "Neither Yelp nor Google returned results" when both providers fail, vs "Try a different city" for normal empty results.
+  - Google `ZERO_RESULTS` handled as a valid empty response (not an error).
+  - Google fallback uses a dedicated `GOOGLE_FALLBACK_TIMEOUT_MS` (5s) vs the per-enrichment timeout (3s), since it's the sole data source in fallback mode.
+  - Verified live: searching "Seoul" returns 20 Google-only restaurants with scores and banner.
+
+2. [x] **Analytics instrumentation (PRD metrics)**
    - Event: `search_submitted` with `{ city, session_id, ts }`.
    - Event: `map_open_clicked` with `{ restaurant_id, city, sort_key, rank, session_id, ts }`.
    - Event: `results_view_closed` with `{ city, dwell_ms, session_id, ts }`.
@@ -292,6 +315,20 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
    - Keep MVP implementation minimal (no vendor lock-in required for Phase 1.5B):
      - Emit events via a single internal logger (server route or server action), and verify in dev via logs.
      - Ensure the event interface can be swapped later (PostHog/GA/etc.) without touching UI call-sites.
+
+**Phase 1.5B (analytics instrumentation) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass (10 files, 77 tests)
+- Implementation:
+  - Added internal analytics endpoint `POST /api/events` with runtime payload validation, same-origin request guard, trusted internal key support (`ANALYTICS_INTERNAL_KEY`), and dev-only log emission.
+  - Added shared analytics event contract + helper builders in `lib/analytics.ts`.
+  - `search_submitted` emitted on every non-empty search submit.
+  - `map_open_clicked` emitted when users click the Google Maps Open link (captures current sort key and rank).
+  - `results_view_closed` emitted when a results view is replaced by a new search or on page unmount with dwell time.
+  - Added UI tests for `results_view_closed` emission on both replacement search and page unmount.
+  - Analytics calls are best-effort and non-blocking (failures are swallowed so UX is unaffected).
 
 ### Phase 2 - Hardening (Parallel + post-ship)
 
@@ -331,19 +368,21 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Michelin is archived for UI and does not block table rendering or sort behavior.
 - **Phase 1.5B exit gate**
   - Loading/error UX is hardened for partial Google failures and slow networks.
+  - Google-only fallback mode works when Yelp returns zero rows or a location error and is clearly labeled in UI.
   - PRD metric events are emitted and can be verified (at minimum via dev logs).
 
 ## Success Criteria
 
 - A user can search a city and get a populated table without leaving the page.
 - Yelp success still returns usable rows even if Google enrichment partially fails.
+- If Yelp has no usable coverage (zero rows or non-hard-fail location/coverage errors), users still get Google-only fallback results with clear source labeling.
 - Map links open Google Maps for enriched rows.
 - Combined score displays 0.0-10.0 (1 decimal), and default sorting uses this score in Phase 1.5A.
 - Key PRD behaviors are test-covered (matching thresholds, score fallback, partial failure handling).
 - Measured performance is acceptable: search responses are typically under `5s` and p95 under `10s`.
 - Usage instrumentation supports PRD validation:
-  - At least 3 map-open clicks can be measured per session.
-  - Return search behavior and time-on-table are tracked.
+  - `search_submitted`, `map_open_clicked`, and `results_view_closed` are emitted with session/time context.
+  - Map-open count, return search behavior, and time-on-table can be measured from emitted events.
 
 ## Open Questions
 
@@ -351,4 +390,4 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - Where should Michelin source refresh happen (manual script run vs scheduled pipeline)?
 - Do we cache city search results in-memory during MVP demos to reduce repeated API costs?
 
-Target resolution: all open questions should be resolved by the end of Phase 1 to avoid blocking Phase 1.5.
+Target resolution: remaining open questions are deferred to Phase 2 hardening and do not block the shipped Phase 1/1.5 scope.

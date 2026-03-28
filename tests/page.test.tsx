@@ -127,7 +127,7 @@ describe("Home page search flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
 
     await waitFor(() =>
-      expect(screen.getByText("No Yelp restaurants found for San Francisco.")).toBeInTheDocument(),
+      expect(screen.getByText(/No restaurants found for San Francisco/)).toBeInTheDocument(),
     );
   });
 
@@ -228,6 +228,63 @@ describe("Home page search flow", () => {
     expect(screen.getByText("6.4")).toBeInTheDocument();
   });
 
+  it("shows google-only banner when response has google_only flag", async () => {
+    global.fetch = vi.fn(async () =>
+      Response.json({
+        city: "Seoul",
+        warnings: [],
+        restaurants: [
+          makeRestaurantFixture("g1", "Google Only Place", {
+            google: { rating: 4.3, review_count: 500, place_id: "p1", maps_url: "https://maps.google.com/p1" },
+            combined_score: 7.5,
+          }),
+        ],
+        google_only: true,
+      }),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Seoul" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Google Only Place")).toBeInTheDocument());
+    expect(screen.getByText("Limited Yelp coverage")).toBeInTheDocument();
+    expect(screen.getByText(/Yelp has limited coverage for Seoul/)).toBeInTheDocument();
+  });
+
+  it("shows dash for yelp fields in google-only mode", async () => {
+    global.fetch = vi.fn(async () =>
+      Response.json({
+        city: "Seoul",
+        warnings: [],
+        restaurants: [
+          makeRestaurantFixture("g1", "Google Fallback Row", {
+            yelp: { rating: 0, review_count: 0, price: null, categories: ["Korean"], lat: 37.56, lng: 126.97 },
+            google: { rating: 4.5, review_count: 800, place_id: "p2", maps_url: "https://maps.google.com/p2" },
+            combined_score: 8.0,
+          }),
+        ],
+        google_only: true,
+      }),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Seoul" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Google Fallback Row")).toBeInTheDocument());
+
+    const row = screen.getByText("Google Fallback Row").closest("tr");
+    expect(row).not.toBeNull();
+    const cells = row!.querySelectorAll("td");
+    const yelpRatingCell = cells[3];
+    const yelpReviewsCell = cells[4];
+    const priceCell = cells[7];
+    expect(yelpRatingCell.textContent).toBe("-");
+    expect(yelpReviewsCell.textContent).toBe("-");
+    expect(priceCell.textContent).toBe("-");
+  });
+
   it("renders dash placeholder for null combined score", async () => {
     global.fetch = vi.fn(async () =>
       Response.json(
@@ -251,4 +308,144 @@ describe("Home page search flow", () => {
     const scoreCell = cells[2];
     expect(scoreCell.textContent).toBe("-");
   });
+
+  it("emits analytics for search submit and map open click", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "/api/search") {
+        return Response.json(
+          makeSearchPayload([
+            makeRestaurantFixture("r-map", "Map Place", {
+              city: "Seoul",
+              google: {
+                rating: 4.5,
+                review_count: 1000,
+                place_id: "map-place-id",
+                maps_url: "https://maps.google.com/map-place-id",
+              },
+              combined_score: 8.1,
+            }),
+          ]),
+        );
+      }
+
+      if (url === "/api/events") {
+        return Response.json({ ok: true, echoed: init?.body ? JSON.parse(String(init.body)) : null });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Seoul" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Map Place")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("link", { name: "Open" }));
+
+    await waitFor(() => {
+      const eventCalls = fetchMock.mock.calls.filter(([arg]) => String(arg) === "/api/events");
+      expect(eventCalls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    const eventPayloads = fetchMock.mock.calls
+      .filter(([arg]) => String(arg) === "/api/events")
+      .map(([, init]) => JSON.parse(String(init?.body)));
+
+    expect(eventPayloads.some((payload) => payload.event === "search_submitted" && payload.city === "Seoul")).toBe(true);
+    expect(
+      eventPayloads.some(
+        (payload) =>
+          payload.event === "map_open_clicked" &&
+          payload.restaurant_id === "r-map" &&
+          payload.city === "Seoul" &&
+          payload.rank === 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("emits results_view_closed when a new search replaces active results", async () => {
+    let searchCall = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "/api/search") {
+        searchCall += 1;
+        if (searchCall === 1) {
+          return Response.json({
+            city: "Seoul",
+            warnings: [],
+            restaurants: [makeRestaurantFixture("r-1", "First Result", { city: "Seoul", combined_score: 7.1 })],
+          });
+        }
+        return Response.json({
+          city: "Tokyo",
+          warnings: [],
+          restaurants: [makeRestaurantFixture("r-2", "Second Result", { city: "Tokyo", combined_score: 7.9 })],
+        });
+      }
+
+      if (url === "/api/events") {
+        return Response.json({ ok: true, echoed: init?.body ? JSON.parse(String(init.body)) : null });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    render(<Home />);
+
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Seoul" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(screen.getByText("First Result")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Tokyo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(screen.getByText("Second Result")).toBeInTheDocument());
+
+    await waitFor(() => {
+      const eventPayloads = fetchMock.mock.calls
+        .filter(([arg]) => String(arg) === "/api/events")
+        .map(([, requestInit]) => JSON.parse(String(requestInit?.body)));
+      expect(eventPayloads.some((payload) => payload.event === "results_view_closed" && payload.city === "Seoul")).toBe(true);
+    });
+  });
+
+  it("emits results_view_closed on page unmount with active results", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url === "/api/search") {
+        return Response.json({
+          city: "Busan",
+          warnings: [],
+          restaurants: [makeRestaurantFixture("r-busan", "Busan Spot", { city: "Busan", combined_score: 8.0 })],
+        });
+      }
+
+      if (url === "/api/events") {
+        return Response.json({ ok: true, echoed: init?.body ? JSON.parse(String(init.body)) : null });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const { unmount } = render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Busan" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => expect(screen.getByText("Busan Spot")).toBeInTheDocument());
+
+    unmount();
+
+    await waitFor(() => {
+      const eventPayloads = fetchMock.mock.calls
+        .filter(([arg]) => String(arg) === "/api/events")
+        .map(([, requestInit]) => JSON.parse(String(requestInit?.body)));
+      expect(eventPayloads.some((payload) => payload.event === "results_view_closed" && payload.city === "Busan")).toBe(true);
+    });
+  });
+
 });

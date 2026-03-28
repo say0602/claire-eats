@@ -7,6 +7,8 @@ type RestaurantTableProps = {
   restaurants: Restaurant[];
   sortKey: SortKey;
   onSortKeyChange: (key: SortKey) => void;
+  isGoogleOnly?: boolean;
+  onMapOpen?: (payload: { restaurantId: string; city: string; rank: number }) => void;
 };
 
 export function formatReviewCount(count: number | null) {
@@ -55,24 +57,33 @@ function SortButton({
   label,
   active,
   onClick,
+  disabled = false,
 }: {
   label: string;
   active: boolean;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
-      className={`text-left ${active ? "font-semibold text-zinc-900" : "text-zinc-700"}`}
+      disabled={disabled}
+      className={`text-left ${disabled ? "cursor-default text-zinc-400" : active ? "font-semibold text-zinc-900" : "text-zinc-700"}`}
       onClick={onClick}
     >
       {label}
-      {active ? " ↓" : ""}
+      {active && !disabled ? " ↓" : ""}
     </button>
   );
 }
 
-export function RestaurantTable({ restaurants, sortKey, onSortKeyChange }: RestaurantTableProps) {
+export function RestaurantTable({
+  restaurants,
+  sortKey,
+  onSortKeyChange,
+  isGoogleOnly = false,
+  onMapOpen,
+}: RestaurantTableProps) {
   const sortedRestaurants = getSortedRestaurants(restaurants, sortKey);
 
   return (
@@ -95,6 +106,7 @@ export function RestaurantTable({ restaurants, sortKey, onSortKeyChange }: Resta
                   label="Yelp Rating"
                   active={sortKey === "yelp_rating"}
                   onClick={() => onSortKeyChange("yelp_rating")}
+                  disabled={isGoogleOnly}
                 />
               </th>
               <th className="w-20 px-1.5 py-2">
@@ -102,6 +114,7 @@ export function RestaurantTable({ restaurants, sortKey, onSortKeyChange }: Resta
                   label="Yelp Reviews"
                   active={sortKey === "yelp_reviews"}
                   onClick={() => onSortKeyChange("yelp_reviews")}
+                  disabled={isGoogleOnly}
                 />
               </th>
               <th className="w-16 px-1.5 py-2">Google Rating</th>
@@ -125,11 +138,11 @@ export function RestaurantTable({ restaurants, sortKey, onSortKeyChange }: Resta
                 <td className="px-1.5 py-2">
                   <ScorePill score={restaurant.combined_score} />
                 </td>
-                <td className="px-1.5 py-2">{formatRating(restaurant.yelp.rating)}</td>
-                <td className="px-1.5 py-2">{formatReviewCount(restaurant.yelp.review_count)}</td>
+                <td className="px-1.5 py-2">{isGoogleOnly ? "-" : formatRating(restaurant.yelp.rating)}</td>
+                <td className="px-1.5 py-2">{isGoogleOnly ? "-" : formatReviewCount(restaurant.yelp.review_count)}</td>
                 <td className="px-1.5 py-2">{formatRating(restaurant.google.rating)}</td>
                 <td className="px-1.5 py-2">{formatReviewCount(restaurant.google.review_count)}</td>
-                <td className="px-1.5 py-2">{restaurant.yelp.price ?? "-"}</td>
+                <td className="px-1.5 py-2">{isGoogleOnly ? "-" : (restaurant.yelp.price ?? "-")}</td>
                 <td className="px-1.5 py-2">{formatCuisine(restaurant.yelp.categories)}</td>
                 <td className="px-1.5 py-2">
                   {restaurant.google.maps_url ? (
@@ -138,6 +151,13 @@ export function RestaurantTable({ restaurants, sortKey, onSortKeyChange }: Resta
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-flex rounded border border-zinc-300 px-1.5 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                      onClick={() =>
+                        onMapOpen?.({
+                          restaurantId: restaurant.id,
+                          city: restaurant.city,
+                          rank: index + 1,
+                        })
+                      }
                     >
                       Open
                     </a>

@@ -58,6 +58,7 @@ Prioritize logic that protects core product constraints:
 - Rows without enrichment render fallback values (`-`)
 - API failures display clear error states without crashing
 - `GET /api/config` returns clear `CONFIG_ERROR` when required env values are missing
+- Analytics events are logged in dev when searching, opening map links, and leaving/replacing a results view (`/api/events`)
 
 ---
 

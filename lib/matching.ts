@@ -74,7 +74,7 @@ export function hasNameOverlap(a: string, b: string) {
   return overlapCount >= 2;
 }
 
-function buildMapsUrl(placeId: string | null) {
+export function buildMapsUrl(placeId: string | null) {
   if (!placeId) return null;
   return `https://www.google.com/maps/place/?q=place_id:${encodeURIComponent(placeId)}`;
 }

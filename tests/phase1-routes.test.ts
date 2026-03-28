@@ -456,6 +456,245 @@ describe("search orchestrator", () => {
     ]);
   });
 
+  it("falls back to Google-only when Yelp returns a 400 location error", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return new Response(
+          JSON.stringify({
+            error: { code: "YELP_UPSTREAM_ERROR", message: "Yelp request failed with status 400." },
+          }),
+          { status: 502, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return Response.json({
+          status: "OK",
+          results: [
+            {
+              name: "Seoul BBQ",
+              rating: 4.6,
+              user_ratings_total: 1200,
+              place_id: "seoul-place-1",
+              types: ["restaurant", "korean_restaurant"],
+              geometry: { location: { lat: 37.5665, lng: 126.978 } },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Seoul" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("Seoul BBQ");
+  });
+
+  it("falls back to Google-only results when Yelp returns zero rows", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "Seoul",
+          restaurants: [],
+        });
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return Response.json({
+          status: "OK",
+          results: [
+            {
+              name: "Seoul BBQ",
+              rating: 4.6,
+              user_ratings_total: 1200,
+              place_id: "seoul-place-1",
+              types: ["restaurant", "food", "korean_restaurant"],
+              geometry: { location: { lat: 37.5665, lng: 126.978 } },
+            },
+            {
+              name: "Kimchi House",
+              rating: 4.3,
+              user_ratings_total: 800,
+              place_id: "seoul-place-2",
+              types: ["restaurant", "establishment"],
+              geometry: { location: { lat: 37.567, lng: 126.979 } },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Seoul" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants).toHaveLength(2);
+    expect(payload.restaurants[0].name).toBe("Seoul BBQ");
+    expect(payload.restaurants[0].google.rating).toBe(4.6);
+    expect(payload.restaurants[0].google.place_id).toBe("seoul-place-1");
+    expect(payload.restaurants[0].yelp.rating).toBe(0);
+    expect(payload.restaurants[0].yelp.review_count).toBe(0);
+    expect(payload.restaurants[0].id).toMatch(/^google-fallback-/);
+    expect(payload.restaurants[0].combined_score).toEqual(expect.any(Number));
+    expect(payload.restaurants[0].yelp.categories).toEqual(["Korean Restaurant"]);
+  });
+
+  it("returns empty without error when Yelp returns zero and Google returns ZERO_RESULTS", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({ city: "Middle of Nowhere", restaurants: [] });
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return Response.json({ status: "ZERO_RESULTS", results: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Middle of Nowhere" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants).toHaveLength(0);
+    expect(payload.warnings).toEqual([]);
+  });
+
+  it("falls back to Google-only when Yelp fetch throws a network error", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        throw new TypeError("fetch failed");
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return Response.json({
+          status: "OK",
+          results: [
+            {
+              name: "Network Fallback Place",
+              rating: 4.1,
+              user_ratings_total: 300,
+              place_id: "net-place-1",
+              types: ["restaurant"],
+              geometry: { location: { lat: 40.7, lng: -74.0 } },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Atlantis" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("Network Fallback Place");
+  });
+
+  it("returns empty with warning when Yelp returns zero and Google also fails", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "Nowhere",
+          restaurants: [],
+        });
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return new Response("error", { status: 500 });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Nowhere" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants).toHaveLength(0);
+    expect(payload.warnings).toEqual([
+      { code: "GOOGLE_UPSTREAM_ERROR", message: "Google fallback search failed." },
+    ]);
+  });
+
   it("treats malformed google payloads as upstream warning while keeping rows", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

@@ -1,9 +1,16 @@
  "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { RestaurantTable } from "@/components/RestaurantTable";
 import type { SortKey } from "@/components/RestaurantTable";
 import { SearchBar } from "@/components/SearchBar";
+import {
+  buildMapOpenClickedEvent,
+  buildResultsViewClosedEvent,
+  buildSearchSubmittedEvent,
+  createSessionId,
+  emitAnalyticsEvent,
+} from "@/lib/analytics";
 import type { Restaurant, SearchWarning } from "@/lib/types";
 
 function isSearchWarning(value: unknown): value is SearchWarning {
@@ -37,7 +44,7 @@ function isRestaurantArray(value: unknown): value is Restaurant[] {
   });
 }
 
-function isSearchSuccessPayload(value: unknown): value is { city: string; restaurants: Restaurant[]; warnings: SearchWarning[] } {
+function isSearchSuccessPayload(value: unknown): value is { city: string; restaurants: Restaurant[]; warnings: SearchWarning[]; google_only?: boolean } {
   if (!value || typeof value !== "object") return false;
   const payload = value as Record<string, unknown>;
   return (
@@ -63,14 +70,45 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchedCity, setSearchedCity] = useState<string | null>(null);
+  const [isGoogleOnly, setIsGoogleOnly] = useState(false);
+  const sessionIdRef = useRef<string>(createSessionId());
+  const activeResultsRef = useRef<{ city: string; openedAtMs: number } | null>(null);
+  const latestSearchIdRef = useRef(0);
+
+  const closeResultsView = useCallback(() => {
+    const activeResults = activeResultsRef.current;
+    if (!activeResults) return;
+
+    const dwellMs = Math.max(0, Date.now() - activeResults.openedAtMs);
+    void emitAnalyticsEvent(
+      buildResultsViewClosedEvent({
+        city: activeResults.city,
+        dwellMs,
+        sessionId: sessionIdRef.current,
+      }),
+    );
+    activeResultsRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      closeResultsView();
+    };
+  }, [closeResultsView]);
 
   async function handleSearch() {
     const trimmedCity = city.trim();
     if (!trimmedCity) return;
+    const searchId = latestSearchIdRef.current + 1;
+    latestSearchIdRef.current = searchId;
+
+    closeResultsView();
+    void emitAnalyticsEvent(buildSearchSubmittedEvent(trimmedCity, sessionIdRef.current));
 
     setIsLoading(true);
     setErrorMessage(null);
     setWarnings([]);
+    setIsGoogleOnly(false);
 
     try {
       const response = await fetch("/api/search", {
@@ -80,9 +118,12 @@ export default function Home() {
       });
 
       const payload: unknown = await response.json();
+      if (searchId !== latestSearchIdRef.current) return;
+
       if (!response.ok || hasErrorPayload(payload)) {
         setRestaurants([]);
         setSearchedCity(trimmedCity);
+        activeResultsRef.current = null;
         const errorMessage =
           hasErrorPayload(payload) && typeof payload.error.message === "string"
             ? payload.error.message
@@ -92,8 +133,10 @@ export default function Home() {
       }
 
       if (!isSearchSuccessPayload(payload)) {
+        if (searchId !== latestSearchIdRef.current) return;
         setRestaurants([]);
         setSearchedCity(trimmedCity);
+        activeResultsRef.current = null;
         setErrorMessage("Search response format is invalid.");
         return;
       }
@@ -101,15 +144,42 @@ export default function Home() {
       setRestaurants(payload.restaurants);
       setWarnings(payload.warnings);
       setSearchedCity(payload.city || trimmedCity);
+      setIsGoogleOnly(payload.google_only === true);
       setSortKey("combined_score");
+      activeResultsRef.current =
+        payload.restaurants.length > 0
+          ? {
+              city: payload.city || trimmedCity,
+              openedAtMs: Date.now(),
+            }
+          : null;
     } catch {
+      if (searchId !== latestSearchIdRef.current) return;
       setRestaurants([]);
       setSearchedCity(trimmedCity);
+      activeResultsRef.current = null;
       setErrorMessage("Unable to complete search. Please try again.");
     } finally {
-      setIsLoading(false);
+      if (searchId === latestSearchIdRef.current) {
+        setIsLoading(false);
+      }
     }
   }
+
+  const handleMapOpen = useCallback(
+    ({ restaurantId, city: mapCity, rank }: { restaurantId: string; city: string; rank: number }) => {
+      void emitAnalyticsEvent(
+        buildMapOpenClickedEvent({
+          restaurantId,
+          city: mapCity,
+          sortKey,
+          rank,
+          sessionId: sessionIdRef.current,
+        }),
+      );
+    },
+    [sortKey],
+  );
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
@@ -124,6 +194,13 @@ export default function Home() {
           onSubmit={handleSearch}
           isLoading={isLoading}
         />
+
+        {isGoogleOnly && restaurants.length > 0 && (
+          <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800" aria-live="polite">
+            <p className="font-medium">Limited Yelp coverage</p>
+            <p>Yelp has limited coverage for {searchedCity}. Showing Google-only results — Yelp ratings and review counts are not available.</p>
+          </div>
+        )}
 
         {warnings.length > 0 && (
           <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
@@ -145,18 +222,36 @@ export default function Home() {
 
         {!errorMessage && !isLoading && searchedCity && restaurants.length === 0 && (
           <div className="rounded border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
-            No Yelp restaurants found for {searchedCity}.
+            {isGoogleOnly
+              ? `Neither Yelp nor Google returned results for ${searchedCity}.`
+              : `No restaurants found for ${searchedCity}. Try a different city or check the spelling.`}
           </div>
         )}
 
         {isLoading && (
-          <div className="rounded border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
-            Loading restaurants...
+          <div className="rounded border border-zinc-200 bg-white p-4">
+            <p className="mb-3 text-sm font-medium text-zinc-600">Searching for restaurants...</p>
+            <div className="space-y-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="flex gap-3">
+                  <div className="h-4 w-8 animate-pulse rounded bg-zinc-100" />
+                  <div className="h-4 flex-1 animate-pulse rounded bg-zinc-100" />
+                  <div className="h-4 w-12 animate-pulse rounded bg-zinc-100" />
+                  <div className="h-4 w-12 animate-pulse rounded bg-zinc-100" />
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
         {!isLoading && restaurants.length > 0 && (
-          <RestaurantTable restaurants={restaurants} sortKey={sortKey} onSortKeyChange={setSortKey} />
+          <RestaurantTable
+            restaurants={restaurants}
+            sortKey={sortKey}
+            onSortKeyChange={setSortKey}
+            isGoogleOnly={isGoogleOnly}
+            onMapOpen={handleMapOpen}
+          />
         )}
       </main>
     </div>
