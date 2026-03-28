@@ -4,17 +4,21 @@ import type { Restaurant } from "../lib/types";
 
 function makeRestaurant(
   id: string,
-  yelpReviews: number,
-  yelpRating: number,
-  googleReviews: number | null,
+  overrides: {
+    yelpReviews?: number;
+    yelpRating?: number;
+    googleReviews?: number | null;
+    combinedScore?: number | null;
+    michelinAward?: "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand" | "Michelin Guide" | null;
+  } = {},
 ): Restaurant {
   return {
     id,
     name: `Restaurant ${id}`,
     city: "San Francisco",
     yelp: {
-      rating: yelpRating,
-      review_count: yelpReviews,
+      rating: overrides.yelpRating ?? 4.0,
+      review_count: overrides.yelpReviews ?? 100,
       price: "$$",
       categories: [],
       lat: 37.77,
@@ -22,16 +26,16 @@ function makeRestaurant(
     },
     google: {
       rating: 4.2,
-      review_count: googleReviews,
+      review_count: overrides.googleReviews ?? null,
       place_id: null,
       maps_url: null,
     },
     michelin: {
-      award: null,
+      award: overrides.michelinAward ?? null,
       green_star: false,
-      matched: false,
+      matched: overrides.michelinAward !== null && overrides.michelinAward !== undefined,
     },
-    combined_score: null,
+    combined_score: overrides.combinedScore ?? null,
   };
 }
 
@@ -50,19 +54,52 @@ describe("formatReviewCount", () => {
 });
 
 describe("getSortedRestaurants", () => {
-  const restaurants = [
-    makeRestaurant("a", 20, 4.5, 300),
-    makeRestaurant("b", 100, 4.2, null),
-    makeRestaurant("c", 80, 4.8, 1200),
-  ];
-
-  it("defaults correctly for yelp review sort", () => {
+  it("sorts by yelp review count descending", () => {
+    const restaurants = [
+      makeRestaurant("a", { yelpReviews: 20 }),
+      makeRestaurant("b", { yelpReviews: 100 }),
+      makeRestaurant("c", { yelpReviews: 80 }),
+    ];
     const sorted = getSortedRestaurants(restaurants, "yelp_reviews");
-    expect(sorted.map((restaurant) => restaurant.id)).toEqual(["b", "c", "a"]);
+    expect(sorted.map((r) => r.id)).toEqual(["b", "c", "a"]);
   });
 
   it("sorts by yelp rating descending", () => {
+    const restaurants = [
+      makeRestaurant("a", { yelpRating: 4.5 }),
+      makeRestaurant("b", { yelpRating: 4.2 }),
+      makeRestaurant("c", { yelpRating: 4.8 }),
+    ];
     const sorted = getSortedRestaurants(restaurants, "yelp_rating");
-    expect(sorted.map((restaurant) => restaurant.id)).toEqual(["c", "a", "b"]);
+    expect(sorted.map((r) => r.id)).toEqual(["c", "a", "b"]);
+  });
+
+  it("sorts by combined score descending with nulls last", () => {
+    const restaurants = [
+      makeRestaurant("a", { combinedScore: 7.2 }),
+      makeRestaurant("b", { combinedScore: null }),
+      makeRestaurant("c", { combinedScore: 9.1 }),
+    ];
+    const sorted = getSortedRestaurants(restaurants, "combined_score");
+    expect(sorted.map((r) => r.id)).toEqual(["c", "a", "b"]);
+  });
+
+  it("sorts by google reviews descending with nulls last", () => {
+    const restaurants = [
+      makeRestaurant("a", { googleReviews: 300 }),
+      makeRestaurant("b", { googleReviews: null }),
+      makeRestaurant("c", { googleReviews: 1200 }),
+    ];
+    const sorted = getSortedRestaurants(restaurants, "google_reviews");
+    expect(sorted.map((r) => r.id)).toEqual(["c", "a", "b"]);
+  });
+
+  it("keeps stable order when all nullable values are null", () => {
+    const restaurants = [
+      makeRestaurant("a", { combinedScore: null }),
+      makeRestaurant("b", { combinedScore: null }),
+    ];
+    const sorted = getSortedRestaurants(restaurants, "combined_score");
+    expect(sorted.map((r) => r.id)).toEqual(["a", "b"]);
   });
 });

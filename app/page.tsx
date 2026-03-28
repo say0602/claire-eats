@@ -4,7 +4,7 @@ import { useState } from "react";
 import { RestaurantTable } from "@/components/RestaurantTable";
 import type { SortKey } from "@/components/RestaurantTable";
 import { SearchBar } from "@/components/SearchBar";
-import type { Restaurant, SearchResponse, SearchWarning } from "@/lib/types";
+import type { Restaurant, SearchWarning } from "@/lib/types";
 
 function isSearchWarning(value: unknown): value is SearchWarning {
   if (!value || typeof value !== "object") return false;
@@ -59,7 +59,7 @@ export default function Home() {
   const [city, setCity] = useState("");
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
   const [warnings, setWarnings] = useState<SearchWarning[]>([]);
-  const [sortKey, setSortKey] = useState<SortKey>("yelp_reviews");
+  const [sortKey, setSortKey] = useState<SortKey>("combined_score");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchedCity, setSearchedCity] = useState<string | null>(null);
@@ -79,7 +79,7 @@ export default function Home() {
         body: JSON.stringify({ city: trimmedCity }),
       });
 
-      const payload = (await response.json()) as SearchResponse | unknown;
+      const payload: unknown = await response.json();
       if (!response.ok || hasErrorPayload(payload)) {
         setRestaurants([]);
         setSearchedCity(trimmedCity);
@@ -101,7 +101,7 @@ export default function Home() {
       setRestaurants(payload.restaurants);
       setWarnings(payload.warnings);
       setSearchedCity(payload.city || trimmedCity);
-      setSortKey("yelp_reviews");
+      setSortKey("combined_score");
     } catch {
       setRestaurants([]);
       setSearchedCity(trimmedCity);
@@ -112,11 +112,11 @@ export default function Home() {
   }
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
+    <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
       <main className="flex flex-col gap-4">
         <header>
           <h1 className="text-2xl font-semibold text-zinc-900">Claire Eats</h1>
-          <p className="mt-1 text-sm text-zinc-600">Research restaurants by city with Yelp-first results.</p>
+          <p className="mt-1 text-sm text-zinc-600">Research restaurants by city — Yelp and Google in one view.</p>
         </header>
         <SearchBar
           value={city}

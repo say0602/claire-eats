@@ -33,6 +33,54 @@ describe("convertMichelinData", () => {
     });
   });
 
+  it("normalizes case-insensitive star and bib awards", () => {
+    const converted = convertMichelinData([
+      {
+        Name: "Lowercase Star",
+        City: "Tokyo",
+        Award: "1 star",
+        GreenStar: false,
+        Latitude: 35.68,
+        Longitude: 139.76,
+      },
+      {
+        Name: "Lowercase Bib",
+        City: "Tokyo",
+        Award: "bib gourmand",
+        GreenStar: false,
+        Latitude: 35.69,
+        Longitude: 139.77,
+      },
+    ]);
+
+    expect(converted.cities["tokyo"][0]?.award).toBe("1 Star");
+    expect(converted.cities["tokyo"][1]?.award).toBe("Bib Gourmand");
+  });
+
+  it("normalizes guide-style awards to Michelin Guide", () => {
+    const converted = convertMichelinData([
+      {
+        Name: "Guide Place",
+        City: "San Francisco",
+        Award: "Guide",
+        GreenStar: false,
+        Latitude: 37.77,
+        Longitude: -122.42,
+      },
+      {
+        Name: "Selected Place",
+        City: "San Francisco",
+        Award: "Selected Restaurants",
+        GreenStar: false,
+        Latitude: 37.78,
+        Longitude: -122.43,
+      },
+    ]);
+
+    expect(converted.cities["san francisco"][0]?.award).toBe("Michelin Guide");
+    expect(converted.cities["san francisco"][1]?.award).toBe("Michelin Guide");
+  });
+
   it("drops rows missing required fields", () => {
     const converted = convertMichelinData([
       {
@@ -43,7 +91,7 @@ describe("convertMichelinData", () => {
       {
         Name: "Invalid Award",
         City: "San Francisco",
-        Award: "Guide",
+        Award: "Not Michelin",
         Latitude: 37.77,
         Longitude: -122.42,
       },

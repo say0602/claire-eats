@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-type MichelinAward = "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand";
+type MichelinAward = "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand" | "Michelin Guide";
 
 type MichelinCityEntry = {
   name: string;
@@ -18,7 +18,7 @@ type MichelinCityIndex = {
 
 type MichelinSourceRow = Record<string, unknown>;
 
-const ALLOWED_AWARDS: MichelinAward[] = ["1 Star", "2 Stars", "3 Stars", "Bib Gourmand"];
+const ALLOWED_AWARDS: MichelinAward[] = ["1 Star", "2 Stars", "3 Stars", "Bib Gourmand", "Michelin Guide"];
 
 function normalizeCityKey(city: string) {
   return city
@@ -42,10 +42,28 @@ function parseBoolean(value: unknown) {
   return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "y";
 }
 
+const AWARD_ALIASES: Record<string, MichelinAward> = {
+  "3 stars": "3 Stars",
+  "2 stars": "2 Stars",
+  "1 star": "1 Star",
+  "bib gourmand": "Bib Gourmand",
+  "guide": "Michelin Guide",
+  "michelin guide": "Michelin Guide",
+  "selected": "Michelin Guide",
+  "selected restaurants": "Michelin Guide",
+  "selected restaurant": "Michelin Guide",
+  "michelin selected": "Michelin Guide",
+};
+
 function normalizeAward(value: unknown): MichelinAward | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  return ALLOWED_AWARDS.includes(trimmed as MichelinAward) ? (trimmed as MichelinAward) : null;
+
+  if (ALLOWED_AWARDS.includes(trimmed as MichelinAward)) {
+    return trimmed as MichelinAward;
+  }
+
+  return AWARD_ALIASES[trimmed.toLowerCase()] ?? null;
 }
 
 function getString(row: MichelinSourceRow, keys: string[]) {

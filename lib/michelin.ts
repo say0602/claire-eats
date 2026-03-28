@@ -1,4 +1,4 @@
-export type MichelinAward = "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand";
+import type { MichelinAward } from "@/lib/types";
 
 export type MichelinMatch = {
   award: MichelinAward | null;
@@ -53,7 +53,13 @@ function normalizeCityKey(city: string) {
 }
 
 function isMichelinAward(value: unknown): value is MichelinAward {
-  return value === "1 Star" || value === "2 Stars" || value === "3 Stars" || value === "Bib Gourmand";
+  return (
+    value === "1 Star" ||
+    value === "2 Stars" ||
+    value === "3 Stars" ||
+    value === "Bib Gourmand" ||
+    value === "Michelin Guide"
+  );
 }
 
 function isFiniteNumber(value: unknown): value is number {

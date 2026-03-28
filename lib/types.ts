@@ -1,4 +1,4 @@
-export type MichelinAward = "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand";
+export type MichelinAward = "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand" | "Michelin Guide";
 export type YelpPriceTier = "$" | "$$" | "$$$" | "$$$$";
 
 export type Restaurant = {

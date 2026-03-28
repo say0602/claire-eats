@@ -1,3 +1,6 @@
+---
+status: active
+---
 
 - `components/ScorePill.tsx` (created)
 - `lib/types.ts` (created)
@@ -14,21 +17,20 @@ Build and ship the first working version of Claire Eats as a table-first restaur
 - User enters a city.
 - System fetches Yelp restaurants as the primary list.
 - System enriches each result with Google Places (best-effort).
-- System adds Michelin badge data from a local static dataset (best-effort).
 - UI shows one sortable comparison table with map deep-links.
 
-The MVP target is a usable, reliable workflow in one week. Phase 1.5 then adds the highest-value quality boost (Michelin badges + combined score default sort + better loading/error UX).
+The MVP target is a usable, reliable workflow in one week. Phase 1.5 then adds the highest-value quality boost (combined score default sort + better loading/error UX).
 
-Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end ideal flow, while delivery scope is defined by the PRD "Phases" section. This plan follows those phase boundaries: Michelin + combined score are Phase 1.5.
+Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end ideal flow, while delivery scope is defined by the PRD "Phases" section. This plan follows those phase boundaries: combined score is delivered in Phase 1.5A, while Michelin UI is archived for now.
 
 ## PRD → Plan Mapping (Scope Alignment)
 
 - **PRD 5.1 City search** → Phase 1: `SearchBar` + `/api/search` input validation
 - **PRD 5.2 Yelp aggregation** → Phase 1: `/api/yelp` + normalization into shared `Restaurant` shape
 - **PRD 5.2 Google enrichment** → Phase 1: `/api/google` + best-effort enrichment of top N Yelp rows
-- **PRD 5.3 Matching logic** → Phase 1: `lib/matching.ts` (Google acceptance ~100m / overlap); Phase 1.5A: Michelin nearest-neighbor <80m
+- **PRD 5.3 Matching logic** → Phase 1: `lib/matching.ts` (Google acceptance ~100m / overlap)
 - **PRD 5.4 Combined score** → Phase 1.5A: `lib/scoring.ts` + default sort by score
-- **PRD 5.5 Table view + 5.6 Sorting** → Phase 1: table with Yelp-first sorting; Phase 1.5A: add Score/Michelin columns + score sort becomes default
+- **PRD 5.5 Table view + 5.6 Sorting** → Phase 1: table with Yelp-first sorting; Phase 1.5A: add Score column + score sort becomes default
 - **PRD 9 Edge cases** → Phase 1+: warnings contract, partial result rendering, fallback states
 
 ## Design Decisions
@@ -42,17 +44,17 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Treat Yelp/Google API quotas and latency as first-class constraints from MVP.
   - Use bounded concurrency, timeouts, and fallback behavior for 429/5xx failures.
 - **Yelp as canonical row source.**
-  - Yelp decides row inclusion; Google/Michelin only enrich existing rows.
+  - Yelp decides row inclusion; Google enriches existing rows.
   - This guarantees stable rows even when enrichment providers fail.
 - **Coordinate-first matching strategy.**
-  - Use Haversine threshold checks for Michelin and Google acceptance where possible.
+  - Use Haversine threshold checks for Google acceptance where possible.
   - Keep string overlap as a lightweight fallback for Google.
 - **Partial data is a valid result.**
-  - Missing Google or Michelin fields render as empty values, never row deletion.
+  - Missing Google fields render as empty values, never row deletion.
   - Users should always get usable output from a city search when Yelp succeeds.
 - **Phase split mirrors PRD.**
   - Phase 1: core search + table + Yelp-first flow.
-  - Phase 1.5A: Michelin column + combined score + score-first sorting.
+  - Phase 1.5A: combined score + score-first sorting.
   - Phase 1.5B: loading/error UX + instrumentation for PRD metrics.
 - **Operational defaults are explicit for MVP (tunable constants, not PRD requirements).**
   - Yelp result limit: `30` rows per city search.
@@ -75,7 +77,6 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 
 - Yelp coordinates are present for the large majority of returned businesses.
 - Google Places quota is sufficient for the MVP defaults (`20` enrichments per search).
-- Michelin dataset refresh cadence is at most annual for MVP/Phase 1.5.
 - Initial launch target is desktop-first; mobile polish beyond basic responsiveness is Phase 2.
 
 ## Implementation Steps
@@ -212,12 +213,14 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 
 ### Phase 1.5A - Data Value (Day 5-6)
 
-1. [x] **Michelin data pipeline**
+> Archived scope note (2026-03-24): Michelin UI was removed because current dataset coverage is too sparse for reliable user value. Michelin-specific implementation remains non-blocking and can be re-enabled later.
+
+1. [x] **Michelin data pipeline (archived)**
    - Create `scripts/convert-michelin.ts` to transform source data into app-ready JSON.
    - Generate and store `data/michelin.json` in a city-indexed shape for fast lookups.
    - Add schema validation for generated output.
 
-2. [x] **Michelin matching runtime (`lib/michelin.ts`)**
+2. [x] **Michelin matching runtime (`lib/michelin.ts`) (archived)**
    - Load/filter Michelin data by city.
    - Nearest-neighbor coordinate match with 80m threshold.
    - Return `{ award, green_star, matched }` or empty values.
@@ -227,7 +230,7 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
    - Handle single-source fallback if one provider is missing.
    - Min-max normalize score to 0-10 and round to 1 decimal.
 
-4. [x] **Integrate Michelin + score into search response**
+4. [x] **Integrate Michelin + score into search response (Michelin archived for UI)**
    - Extend orchestrator output with `michelin` and `combined_score`.
    - Keep Michelin non-blocking so rows still render if no match exists.
 
@@ -237,22 +240,29 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - `npm.cmd run build` -> pass
 - `npm.cmd run test:ci` -> pass
 
-5. [ ] **UI upgrades**
-   - Add `MichelinBadge.tsx` and `ScorePill.tsx`.
-   - Add `Score` and `Michelin` columns.
+5. [x] **UI upgrades**
+   - Add `ScorePill.tsx`.
+   - Keep Michelin badge implementation archived (not rendered in table UI).
+   - Add `Score` column.
    - Make combined score default sort.
    - Add optional sort by Google reviews.
+
+**Phase 1.5A (Step 5) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass (9 files, 55 tests)
 
 **Phase 1.5A UI scope (explicit):**
 
 - **Table columns added in Phase 1.5A**
   - `Score` (0–10, 1 decimal; `-` if insufficient data)
-  - `Michelin` (badge for `1 Star` / `2 Stars` / `3 Stars` / `Bib Gourmand`; empty when unmatched)
 - **Sorting (PRD-aligned)**
   - Default sort becomes `Score` (descending)
   - Keep sort option for `Yelp Reviews`
   - Add sort option for `Google Reviews`
 - **Still out of scope in Phase 1.5A**
+  - Michelin column in table UI (archived due to sparse match coverage)
   - “Perfect” cross-provider matching improvements (Phase 2)
   - Any changes that make Michelin affect numeric score (PRD says Michelin is a badge only)
 
@@ -306,9 +316,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
   - Concurrency cap + timeout budget + `warnings[]` contract are verified in tests.
   - Default operational limits are enforced (`30` Yelp rows, top `20` Google enrichments, concurrency `5`, timeout `2500ms`).
 - **Phase 1.5A exit gate**
-  - Michelin badges and combined score are visible in table.
   - Combined score is default sort and single-source fallback works.
-  - Michelin data lookups are fast (city-indexed JSON; no API calls).
+  - Michelin is archived for UI and does not block table rendering or sort behavior.
 - **Phase 1.5B exit gate**
   - Loading/error UX is hardened for partial Google failures and slow networks.
   - PRD metric events are emitted and can be verified (at minimum via dev logs).
@@ -316,9 +325,8 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 ## Success Criteria
 
 - A user can search a city and get a populated table without leaving the page.
-- Yelp success still returns usable rows even if Google/Michelin partially fail.
+- Yelp success still returns usable rows even if Google enrichment partially fails.
 - Map links open Google Maps for enriched rows.
-- Michelin badge data appears when coordinate match succeeds and remains empty when not found.
 - Combined score displays 0.0-10.0 (1 decimal), and default sorting uses this score in Phase 1.5A.
 - Key PRD behaviors are test-covered (matching thresholds, score fallback, partial failure handling).
 - Measured performance is acceptable: search responses are typically under `5s` and p95 under `10s`.
