@@ -269,9 +269,20 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 ### Phase 1.5B - UX + Measurement (Day 6-7)
 
 1. [ ] **UX hardening**
+   - [x] Add city input suggestion dropdown to guide valid city formatting (custom filtered list in `SearchBar`).
    - Improve loading skeleton and retry behavior.
    - Better error copy for invalid city vs upstream API failures.
    - Keep table stable during refetches to avoid jumpy UI.
+
+**Phase 1.5B (UX hardening, city suggestions) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass (9 files, 56 tests)
+- UI checks implemented:
+  - Typing in city input shows filtered suggestion dropdown.
+  - Clicking a suggestion writes full city value into the input.
+  - Dropdown closes on `Escape`.
 
 2. [ ] **Analytics instrumentation (PRD metrics)**
    - Event: `search_submitted` with `{ city, session_id, ts }`.

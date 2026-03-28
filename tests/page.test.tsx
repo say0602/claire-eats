@@ -43,6 +43,20 @@ function makeRestaurantFixture(id: string, name: string, overrides: Record<strin
 }
 
 describe("Home page search flow", () => {
+  it("shows city suggestions to guide valid input", () => {
+    render(<Home />);
+
+    const cityInput = screen.getByLabelText("City");
+    fireEvent.focus(cityInput);
+    fireEvent.change(cityInput, { target: { value: "san" } });
+
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "San Francisco, CA" })).toBeInTheDocument();
+
+    fireEvent.mouseDown(screen.getByText("San Francisco, CA"));
+    expect(screen.getByLabelText("City")).toHaveValue("San Francisco, CA");
+  });
+
   it("shows search results sorted by combined score by default", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json(
