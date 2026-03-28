@@ -237,15 +237,16 @@ export async function POST(request: Request) {
 
   await Promise.all(workers);
 
-  for (const restaurant of restaurants) {
-    restaurant.michelin = matchMichelinForRestaurant({
+  const restaurantsWithMichelin = restaurants.map((restaurant) => ({
+    ...restaurant,
+    michelin: matchMichelinForRestaurant({
       city: restaurant.city,
       lat: restaurant.yelp.lat,
       lng: restaurant.yelp.lng,
-    });
-  }
+    }),
+  }));
 
-  const scoredRestaurants = computeCombinedScores(restaurants);
+  const scoredRestaurants = computeCombinedScores(restaurantsWithMichelin);
 
   if (warningCodes.size > 0) {
     warningCodes.add("PARTIAL_ENRICHMENT");
