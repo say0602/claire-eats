@@ -12,6 +12,8 @@ export type Restaurant = {
     categories: string[];
     lat: number;
     lng: number;
+    address?: string | null;
+    postal_code?: string | null;
   };
   google: {
     rating: number | null;

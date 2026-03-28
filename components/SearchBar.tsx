@@ -44,7 +44,7 @@ export function SearchBar({
 
   return (
     <form
-      className="w-full rounded border border-zinc-200 bg-white p-4"
+      className="w-full"
       aria-label="Search restaurants form"
       onSubmit={(event) => {
         event.preventDefault();
@@ -53,10 +53,10 @@ export function SearchBar({
         }
       }}
     >
-      <label htmlFor="city" className="mb-2 block text-sm font-medium">
+      <label htmlFor="city" className="mb-2 block text-sm font-medium text-[#8A7060]">
         City
       </label>
-      <div className="flex flex-col gap-3 sm:flex-row">
+      <div className="flex items-stretch">
         <div className="relative w-full">
           <input
             id="city"
@@ -75,7 +75,7 @@ export function SearchBar({
             }}
             autoComplete="off"
             disabled={disabled || isLoading}
-            className="w-full rounded border border-zinc-300 px-3 py-2"
+            className="h-12 w-full rounded-l-xl rounded-r-none border border-[#E8DAD0] bg-white px-5 text-[18px] text-[#2C1810] placeholder:text-[#8A7060] focus:outline-none focus:ring-2 focus:ring-[#C4342D]/20"
             placeholder="Enter a city (e.g., San Francisco, CA)"
             aria-controls="city-suggestions"
             aria-autocomplete="list"
@@ -106,7 +106,7 @@ export function SearchBar({
         </div>
         <button
           type="submit"
-          className="rounded bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-zinc-500"
+          className="h-12 rounded-r-xl rounded-l-none bg-[#C4342D] px-8 text-base font-semibold text-white transition-colors hover:bg-[#AD2E29] disabled:cursor-not-allowed disabled:bg-[#C4342D]/70"
           disabled={isSubmitDisabled}
         >
           {isLoading ? "Searching..." : "Search"}

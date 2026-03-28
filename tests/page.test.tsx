@@ -57,12 +57,18 @@ describe("Home page search flow", () => {
     expect(screen.getByLabelText("City")).toHaveValue("San Francisco, CA");
   });
 
-  it("shows search results sorted by combined score by default", async () => {
+  it("shows search results sorted by Yelp reviews by default", async () => {
     const fetchMock = vi.fn(async () =>
       Response.json(
         makeSearchPayload([
-          makeRestaurantFixture("r-low", "Low Score", { combined_score: 3.5 }),
-          makeRestaurantFixture("r-high", "High Score", { combined_score: 8.2 }),
+          makeRestaurantFixture("r-low", "Lower Reviews", {
+            yelp: { rating: 4.7, review_count: 120, price: "$$", categories: ["Test"], lat: 37.77, lng: -122.42 },
+            combined_score: 9.4,
+          }),
+          makeRestaurantFixture("r-high", "Higher Reviews", {
+            yelp: { rating: 4.1, review_count: 600, price: "$$", categories: ["Test"], lat: 37.77, lng: -122.42 },
+            combined_score: 6.2,
+          }),
         ]),
       ),
     );
@@ -72,10 +78,10 @@ describe("Home page search flow", () => {
     fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
 
-    await waitFor(() => expect(screen.getByText("High Score")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Higher Reviews")).toBeInTheDocument());
 
-    const high = screen.getByText("High Score");
-    const low = screen.getByText("Low Score");
+    const high = screen.getByText("Higher Reviews");
+    const low = screen.getByText("Lower Reviews");
     expect((high.compareDocumentPosition(low) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
   });
 
@@ -199,6 +205,63 @@ describe("Home page search flow", () => {
     const reorderedFirst = screen.getByText("High Rating Low Reviews");
     const reorderedSecond = screen.getByText("Low Rating High Reviews");
     expect((reorderedFirst.compareDocumentPosition(reorderedSecond) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
+  });
+
+  it("allows switching sort key to Google Rating", async () => {
+    global.fetch = vi.fn(async () =>
+      Response.json(
+        makeSearchPayload([
+          makeRestaurantFixture("g-a", "Lower Google Rating", {
+            google: { rating: 4.1, review_count: 500, place_id: "g-a", maps_url: "https://maps.google.com/g-a" },
+            yelp: { rating: 4.0, review_count: 220, price: "$$", categories: [], lat: 37.7, lng: -122.4 },
+            combined_score: 7.1,
+          }),
+          makeRestaurantFixture("g-b", "Higher Google Rating", {
+            google: { rating: 4.8, review_count: 200, place_id: "g-b", maps_url: "https://maps.google.com/g-b" },
+            yelp: { rating: 4.0, review_count: 210, price: "$$", categories: [], lat: 37.7, lng: -122.4 },
+            combined_score: 7.0,
+          }),
+        ]),
+      ),
+    ) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "Tokyo" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Higher Google Rating")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("Google Rating"));
+
+    const first = screen.getByText("Higher Google Rating");
+    const second = screen.getByText("Lower Google Rating");
+    expect((first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).toBe(true);
+  });
+
+  it("renders all returned results without pagination controls", async () => {
+    const restaurants = Array.from({ length: 51 }, (_, index) =>
+      makeRestaurantFixture(`r-${index + 1}`, `Restaurant ${index + 1}`, {
+        yelp: {
+          rating: 4.0,
+          review_count: 1000 - index,
+          price: "$$",
+          categories: [],
+          lat: 37.77,
+          lng: -122.42,
+        },
+        combined_score: 7.0,
+      }),
+    );
+
+    global.fetch = vi.fn(async () => Response.json(makeSearchPayload(restaurants))) as typeof fetch;
+
+    render(<Home />);
+    fireEvent.change(screen.getByLabelText("City"), { target: { value: "San Francisco" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => expect(screen.getByText("Restaurant 1")).toBeInTheDocument());
+    expect(screen.getByText("Restaurant 51")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument();
   });
 
   it("renders score pills when data is present", async () => {

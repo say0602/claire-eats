@@ -3,9 +3,10 @@ type ScorePillProps = {
 };
 
 function scoreColorClass(score: number) {
-  if (score >= 8) return "bg-emerald-100 text-emerald-800";
-  if (score >= 6) return "bg-sky-100 text-sky-800";
-  if (score >= 4) return "bg-amber-100 text-amber-800";
+  if (score >= 9.0) return "bg-emerald-100 text-emerald-800";
+  if (score >= 8.0) return "bg-teal-100 text-teal-800";
+  if (score >= 7.0) return "bg-sky-100 text-sky-800";
+  if (score >= 6.0) return "bg-amber-100 text-amber-800";
   return "bg-zinc-100 text-zinc-600";
 }
 

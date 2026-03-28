@@ -7,6 +7,7 @@ function makeRestaurant(
   overrides: {
     yelpReviews?: number;
     yelpRating?: number;
+    googleRating?: number | null;
     googleReviews?: number | null;
     combinedScore?: number | null;
     michelinAward?: "1 Star" | "2 Stars" | "3 Stars" | "Bib Gourmand" | "Michelin Guide" | null;
@@ -25,7 +26,7 @@ function makeRestaurant(
       lng: -122.42,
     },
     google: {
-      rating: 4.2,
+      rating: overrides.googleRating === undefined ? 4.2 : overrides.googleRating,
       review_count: overrides.googleReviews ?? null,
       place_id: null,
       maps_url: null,
@@ -91,6 +92,16 @@ describe("getSortedRestaurants", () => {
       makeRestaurant("c", { googleReviews: 1200 }),
     ];
     const sorted = getSortedRestaurants(restaurants, "google_reviews");
+    expect(sorted.map((r) => r.id)).toEqual(["c", "a", "b"]);
+  });
+
+  it("sorts by google rating descending with nulls last", () => {
+    const restaurants = [
+      makeRestaurant("a", { googleRating: 4.1 }),
+      makeRestaurant("b", { googleRating: null }),
+      makeRestaurant("c", { googleRating: 4.8 }),
+    ];
+    const sorted = getSortedRestaurants(restaurants, "google_rating");
     expect(sorted.map((r) => r.id)).toEqual(["c", "a", "b"]);
   });
 

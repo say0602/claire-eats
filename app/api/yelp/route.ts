@@ -3,7 +3,7 @@ import { EnvValidationError, getServerEnv } from "@/lib/env";
 import type { YelpPriceTier } from "@/lib/types";
 
 const YELP_SEARCH_URL = "https://api.yelp.com/v3/businesses/search";
-const YELP_RESULT_LIMIT = 30;
+const YELP_RESULT_LIMIT = 50;
 const YELP_TIMEOUT_MS = 4000;
 
 type YelpBusiness = {
@@ -14,6 +14,13 @@ type YelpBusiness = {
   price?: string;
   categories?: Array<{ title?: string }>;
   coordinates?: { latitude?: number; longitude?: number };
+  location?: {
+    address1?: string;
+    address2?: string;
+    address3?: string;
+    zip_code?: string;
+    display_address?: string[];
+  };
 };
 
 type YelpApiResponse = {
@@ -31,6 +38,8 @@ type YelpRestaurantSeed = {
     categories: string[];
     lat: number;
     lng: number;
+    address?: string | null;
+    postal_code?: string | null;
   };
 };
 
@@ -57,6 +66,20 @@ function toSeed(city: string, business: YelpBusiness): YelpRestaurantSeed | null
   const lng = business.coordinates?.longitude;
   if (typeof lat !== "number" || typeof lng !== "number") return null;
 
+  const displayAddress = business.location?.display_address
+    ?.map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(", ");
+  const streetAddress = [business.location?.address1, business.location?.address2, business.location?.address3]
+    .filter((line): line is string => typeof line === "string" && line.trim().length > 0)
+    .map((line) => line.trim())
+    .join(" ");
+  const address = displayAddress || streetAddress || null;
+  const postalCode =
+    typeof business.location?.zip_code === "string" && business.location.zip_code.trim().length > 0
+      ? business.location.zip_code.trim()
+      : null;
+
   return {
     id: business.id,
     name: business.name,
@@ -70,6 +93,8 @@ function toSeed(city: string, business: YelpBusiness): YelpRestaurantSeed | null
         .filter((title): title is string => Boolean(title)),
       lat,
       lng,
+      address,
+      postal_code: postalCode,
     },
   };
 }
@@ -107,13 +132,16 @@ export async function POST(request: Request) {
     throw error;
   }
 
+  const searchUrl = new URL(YELP_SEARCH_URL);
+  searchUrl.searchParams.set("location", city);
+  // Yelp category filter is too strict (e.g. excludes bakery-heavy "restaurant" results like Porto's).
+  // Using term=restaurants better mirrors Yelp.com "Restaurants" search behavior.
+  searchUrl.searchParams.set("term", "restaurants");
+  searchUrl.searchParams.set("limit", String(YELP_RESULT_LIMIT));
+  searchUrl.searchParams.set("sort_by", "review_count");
+
   const timeout = withTimeout(YELP_TIMEOUT_MS);
   try {
-    const searchUrl = new URL(YELP_SEARCH_URL);
-    searchUrl.searchParams.set("location", city);
-    searchUrl.searchParams.set("categories", "restaurants");
-    searchUrl.searchParams.set("limit", String(YELP_RESULT_LIMIT));
-
     const response = await fetch(searchUrl, {
       method: "GET",
       headers: {
@@ -138,7 +166,11 @@ export async function POST(request: Request) {
       .map((business) => toSeed(city, business))
       .filter((value): value is YelpRestaurantSeed => value !== null);
 
-    return NextResponse.json({ city, restaurants: seeds });
+    const dedupedSeeds = Array.from(new Map(seeds.map((seed) => [seed.id, seed])).values())
+      .sort((a, b) => b.yelp.review_count - a.yelp.review_count)
+      .slice(0, YELP_RESULT_LIMIT);
+
+    return NextResponse.json({ city, restaurants: dedupedSeeds });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       return NextResponse.json(

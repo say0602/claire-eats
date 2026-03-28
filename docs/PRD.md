@@ -107,11 +107,12 @@ Bundled as a pre-processed JSON file derived from the open-source [ngshiheng/mic
 
 ### 5.3 Matching logic
 
-#### Google enrichment matching (MVP)
+#### Google enrichment matching
 
-- Take the first Google Places result for the search query
-- Accept if: name partially overlaps **or** coordinates are within ~100 m
-- Reject (null Google data) if neither condition is met
+- Evaluate the top 5 Google Places results for each query (with location bias using Yelp coordinates).
+- Score each candidate using a weighted model: name similarity (50%), distance (30%), address overlap (20%).
+- Accept the best candidate if it has a strong signal (name >= 0.45, distance >= 0.6, or address >= 0.7) and meets the minimum confidence score (0.2).
+- Reject (null Google data) if no candidate meets the threshold.
 
 #### Michelin matching
 
@@ -126,18 +127,22 @@ Bundled as a pre-processed JSON file derived from the open-source [ngshiheng/mic
 
 ### 5.4 Combined score
 
-A single numeric score that weights both Yelp and Google signals, dampening the outsized influence of raw review volume via a logarithm.
+A single numeric score that converts Yelp and Google star ratings to a common 10-point scale and averages them with equal weight.
 
 ```
-score = (yelp_rating × log(yelp_reviews) + google_rating × log(google_reviews)) / 2
+yelp10   = yelp_rating × 2
+google10 = google_rating × 2
+score    = (yelp10 + google10) / 2      // when both sources present
 ```
 
-The raw score is min-max normalized across the result set and displayed as a **0–10 value** for readability.
+The score is absolute (not normalized relative to the result set) and displayed as a **0–10 value** for readability.
 
 | Property | Behavior |
 |---|---|
 | Range | 0.0 – 10.0 (displayed to 1 decimal place) |
-| Missing data | If only one source is available, score uses that source alone |
+| Weighting | Equal: Yelp 50%, Google 50% |
+| Missing data | If only one source has real data (rating > 0 and review_count > 0), score uses that source alone |
+| Placeholder zeros | Google-only fallback rows have Yelp rating/reviews = 0; these are treated as missing, not averaged |
 | Michelin signal | Michelin-starred restaurants surface a badge; stars do not affect the numeric score |
 
 ---
@@ -151,7 +156,6 @@ The primary UI surface. All data for a city is presented in a single scrollable,
 | # | — | Row index by current sort |
 | Restaurant | Yelp | Name |
 | Score | Computed | 0–10 combined score |
-| Michelin | Static JSON | Star count badge or Bib Gourmand; empty if none |
 | Yelp Rating | Yelp | Star display + numeric |
 | Yelp Reviews | Yelp | Formatted (e.g. 4.2k) |
 | Google Rating | Google | Star display + numeric |
@@ -166,10 +170,13 @@ The primary UI surface. All data for a city is presented in a single scrollable,
 
 | Option | Default? |
 |---|---|
-| Combined Score | Yes (Phase 1.5+) |
-| Yelp Reviews | Yes (Phase 1 default) |
-| Google Reviews | No |
+| Yelp Reviews | Yes (default for normal searches) |
+| Google Reviews | Yes (default for Google-only fallback) |
+| Combined Score | No |
 | Yelp Rating | No |
+| Google Rating | No |
+
+All sortable columns display a sort indicator icon by default to signal interactivity. Yelp-specific sort options are disabled in Google-only fallback mode.
 
 ---
 
@@ -188,6 +195,8 @@ type Restaurant = {
     categories: string[]
     lat: number
     lng: number
+    address?: string | null     // display address from Yelp
+    postal_code?: string | null // ZIP / postal code from Yelp
   }
 
   google: {
@@ -216,7 +225,7 @@ type Restaurant = {
 
 | | |
 |---|---|
-| **In scope** | City search · Yelp API · Google Places Text Search · First-result matching · Table UI · Google Maps link · Sort by Yelp reviews |
+| **In scope** | City search · Yelp API (50 rows by review count) · Google Places Text Search (top-5 candidate matching with location bias) · Table UI · Google Maps link · Sort by Yelp/Google rating/reviews/score · Google-only fallback when Yelp has no coverage |
 | **Out of scope** | Michelin data · combined score · saved lists · login · perfect matching |
 | **Success criteria** | A real traveler can use it to research restaurants before a trip |
 
@@ -225,23 +234,24 @@ type Restaurant = {
 ### Phase 1.5 — Quick wins
 **Target: days after MVP**
 
-- Michelin badge column (static JSON + coordinate matching)
-- Combined score column, becomes default sort
-- Sort by Google reviews
+- Combined score column (absolute 10-point, equal Yelp/Google weighting)
+- Expanded sort controls (Yelp rating/reviews, Google rating/reviews, score) with visible sort icons
 - Review count formatting (4.2k)
 - Loading UX improvements
 - Error handling and fallback states
+- Google-only fallback mode when Yelp has no usable coverage
+- Michelin UI archived due to sparse/low-confidence coverage (backend matching remains available)
 
-> **Why now:** Michelin data is high value-to-effort given the static JSON approach. Combined score immediately makes the table more useful than raw Yelp/Google numbers alone.
+> **Why now:** Combined score and stronger sorting controls immediately make the table more useful than raw Yelp/Google numbers alone, while fallback UX increases city coverage reliability.
 
 ---
 
 ### Phase 2 — Smart layer
 **Target: 2–4 weeks post-MVP**
 
-- Better matching: normalize restaurant names, Haversine distance filter, match confidence scoring
+- Better matching: further tuning of weighted scoring model (name/distance/address), additional candidate evaluation strategies
 - UI enhancements: hover card with full details, cuisine tag styling, price visual improvement, mobile layout
-- Score tuning: Bayesian average option, per-city score normalization
+- Score tuning: Bayesian average option, review-count confidence weighting
 
 ---
 
@@ -300,7 +310,7 @@ claire-eats/
 | No Michelin match found | Leave Michelin column empty (not an error) |
 | Incorrect Michelin coordinate match | Acceptable at MVP; flagged for Phase 2 tuning |
 | Duplicate Yelp results | Permitted at MVP (de-duplication in Phase 2) |
-| Yelp or Google API failure | Fallback UI with error message; partial results if possible |
+| Yelp or Google API failure | Fallback UI with error message; partial results if possible. If Yelp has no coverage, Google-only fallback with explicit banner. |
 | City with no Michelin coverage | Column visible but empty; no UI error |
 | Combined score with one source only | Compute from available source; no penalty |
 

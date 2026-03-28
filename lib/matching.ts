@@ -7,6 +7,8 @@ type YelpMatchInput = {
   name: string;
   lat: number | null;
   lng: number | null;
+  address?: string | null;
+  postal_code?: string | null;
 };
 
 type GoogleCandidate = {
@@ -16,6 +18,8 @@ type GoogleCandidate = {
   rating: number | null;
   user_ratings_total: number | null;
   place_id: string | null;
+  address?: string | null;
+  postal_code?: string | null;
 };
 
 type GoogleEnrichment = {
@@ -26,7 +30,8 @@ type GoogleEnrichment = {
 };
 
 const EARTH_RADIUS_METERS = 6_371_000;
-const GOOGLE_DISTANCE_THRESHOLD_METERS = 100;
+const GOOGLE_DISTANCE_THRESHOLD_METERS = 250;
+const GOOGLE_MATCH_MIN_SCORE = 0.2;
 
 function toRadians(value: number) {
   return (value * Math.PI) / 180;
@@ -54,24 +59,109 @@ function normalizeName(name: string) {
     .trim();
 }
 
-export function hasNameOverlap(a: string, b: string) {
+function normalizeAddress(address: string) {
+  return address
+    .toLowerCase()
+    .replace(/\b(street|st)\b/g, "st")
+    .replace(/\b(avenue|ave)\b/g, "ave")
+    .replace(/\b(road|rd)\b/g, "rd")
+    .replace(/\b(boulevard|blvd)\b/g, "blvd")
+    .replace(/\b(suite|ste)\b/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getStreetLine(address: string) {
+  const [streetLine] = address.split(",");
+  return streetLine ?? address;
+}
+
+function tokenSet(value: string) {
+  return new Set(value.split(" ").filter((token) => token.length >= 2));
+}
+
+function overlapRatio(a: Set<string>, b: Set<string>) {
+  if (a.size === 0 || b.size === 0) return 0;
+  let overlap = 0;
+  for (const token of a) {
+    if (b.has(token)) overlap += 1;
+  }
+  return overlap / Math.max(a.size, b.size);
+}
+
+function extractStreetNumber(value: string) {
+  const match = value.match(/\b\d+[a-z]?\b/i);
+  return match ? match[0].toLowerCase() : null;
+}
+
+function normalizePostalCode(value: string | null | undefined) {
+  if (!value) return null;
+  const match = value.match(/\d{5}/);
+  return match ? match[0] : null;
+}
+
+function getNameSimilarity(a: string, b: string) {
   const normalizedA = normalizeName(a);
   const normalizedB = normalizeName(b);
+  if (!normalizedA || !normalizedB) return 0;
+  if (normalizedA === normalizedB) return 1;
+  if (normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA)) return 0.9;
 
-  if (!normalizedA || !normalizedB) return false;
-  if (normalizedA.includes(normalizedB) || normalizedB.includes(normalizedA)) return true;
+  const tokensA = tokenSet(normalizedA);
+  const tokensB = tokenSet(normalizedB);
+  return overlapRatio(tokensA, tokensB);
+}
 
-  const tokensA = new Set(normalizedA.split(" ").filter((token) => token.length >= 3));
-  const tokensB = new Set(normalizedB.split(" ").filter((token) => token.length >= 3));
+function getAddressSimilarity(
+  yelpAddress: string | null | undefined,
+  yelpPostalCode: string | null | undefined,
+  googleAddress: string | null | undefined,
+  googlePostalCode: string | null | undefined,
+) {
+  if (!yelpAddress && !yelpPostalCode) return 0;
+  if (!googleAddress && !googlePostalCode) return 0;
 
-  if (tokensA.size === 0 || tokensB.size === 0) return false;
+  const normalizedYelpAddress = yelpAddress ? normalizeAddress(yelpAddress) : "";
+  const normalizedGoogleAddress = googleAddress ? normalizeAddress(googleAddress) : "";
+  const yelpStreet = normalizedYelpAddress ? getStreetLine(normalizedYelpAddress) : "";
+  const googleStreet = normalizedGoogleAddress ? getStreetLine(normalizedGoogleAddress) : "";
+  const yelpStreetNumber = yelpStreet ? extractStreetNumber(yelpStreet) : null;
+  const googleStreetNumber = googleStreet ? extractStreetNumber(googleStreet) : null;
 
-  let overlapCount = 0;
-  for (const token of tokensA) {
-    if (tokensB.has(token)) overlapCount += 1;
+  const tokenScore =
+    yelpStreet && googleStreet
+      ? overlapRatio(tokenSet(yelpStreet), tokenSet(googleStreet))
+      : 0;
+  const streetNumberScore =
+    yelpStreetNumber && googleStreetNumber && yelpStreetNumber === googleStreetNumber ? 1 : 0;
+  const yelpZip = normalizePostalCode(yelpPostalCode ?? yelpAddress ?? null);
+  const googleZip = normalizePostalCode(googlePostalCode ?? googleAddress ?? null);
+  const zipScore = yelpZip && googleZip && yelpZip === googleZip ? 1 : 0;
+
+  return Math.min(1, tokenScore * 0.6 + streetNumberScore * 0.25 + zipScore * 0.15);
+}
+
+function getDistanceScore(yelpRestaurant: YelpMatchInput, candidate: GoogleCandidate) {
+  if (
+    yelpRestaurant.lat === null ||
+    yelpRestaurant.lng === null ||
+    candidate.lat === null ||
+    candidate.lng === null
+  ) {
+    return 0;
   }
 
-  return overlapCount >= 2;
+  const distanceMeters = getDistanceMeters(
+    { lat: yelpRestaurant.lat, lng: yelpRestaurant.lng },
+    { lat: candidate.lat, lng: candidate.lng },
+  );
+  if (distanceMeters > GOOGLE_DISTANCE_THRESHOLD_METERS) return 0;
+  return 1 - distanceMeters / GOOGLE_DISTANCE_THRESHOLD_METERS;
+}
+
+export function hasNameOverlap(a: string, b: string) {
+  return getNameSimilarity(a, b) >= 0.5;
 }
 
 export function buildMapsUrl(placeId: string | null) {
@@ -90,32 +180,41 @@ export function rejectGoogleEnrichment(): GoogleEnrichment {
 
 export function resolveGoogleEnrichment(
   yelpRestaurant: YelpMatchInput,
-  candidate: GoogleCandidate | null,
+  candidateOrCandidates: GoogleCandidate | GoogleCandidate[] | null,
 ): GoogleEnrichment {
-  if (!candidate) return rejectGoogleEnrichment();
+  if (!candidateOrCandidates) return rejectGoogleEnrichment();
+  const candidates = Array.isArray(candidateOrCandidates) ? candidateOrCandidates : [candidateOrCandidates];
+  if (candidates.length === 0) return rejectGoogleEnrichment();
 
-  const nameAccepted =
-    candidate.name !== null ? hasNameOverlap(yelpRestaurant.name, candidate.name) : false;
+  let bestCandidate: GoogleCandidate | null = null;
+  let bestScore = 0;
 
-  const coordinateAccepted =
-    yelpRestaurant.lat !== null &&
-    yelpRestaurant.lng !== null &&
-    candidate.lat !== null &&
-    candidate.lng !== null
-      ? getDistanceMeters(
-          { lat: yelpRestaurant.lat, lng: yelpRestaurant.lng },
-          { lat: candidate.lat, lng: candidate.lng },
-        ) <= GOOGLE_DISTANCE_THRESHOLD_METERS
-      : false;
+  for (const candidate of candidates) {
+    const nameScore = candidate.name ? getNameSimilarity(yelpRestaurant.name, candidate.name) : 0;
+    const distanceScore = getDistanceScore(yelpRestaurant, candidate);
+    const addressScore = getAddressSimilarity(
+      yelpRestaurant.address,
+      yelpRestaurant.postal_code,
+      candidate.address,
+      candidate.postal_code,
+    );
+    const score = nameScore * 0.5 + distanceScore * 0.3 + addressScore * 0.2;
+    const hasStrongSignal = nameScore >= 0.45 || distanceScore >= 0.6 || addressScore >= 0.7;
 
-  if (!nameAccepted && !coordinateAccepted) {
+    if (hasStrongSignal && score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  if (!bestCandidate || bestScore < GOOGLE_MATCH_MIN_SCORE) {
     return rejectGoogleEnrichment();
   }
 
   return {
-    rating: candidate.rating,
-    review_count: candidate.user_ratings_total,
-    place_id: candidate.place_id,
-    maps_url: buildMapsUrl(candidate.place_id),
+    rating: bestCandidate.rating,
+    review_count: bestCandidate.user_ratings_total,
+    place_id: bestCandidate.place_id,
+    maps_url: buildMapsUrl(bestCandidate.place_id),
   };
 }

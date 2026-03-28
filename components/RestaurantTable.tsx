@@ -1,7 +1,8 @@
+import { useMemo } from "react";
 import type { Restaurant } from "@/lib/types";
 import { ScorePill } from "@/components/ScorePill";
 
-export type SortKey = "combined_score" | "yelp_reviews" | "yelp_rating" | "google_reviews";
+export type SortKey = "combined_score" | "yelp_reviews" | "yelp_rating" | "google_rating" | "google_reviews";
 
 type RestaurantTableProps = {
   restaurants: Restaurant[];
@@ -44,6 +45,8 @@ export function getSortedRestaurants(restaurants: Restaurant[], sortKey: SortKey
         return b.yelp.review_count - a.yelp.review_count;
       case "yelp_rating":
         return b.yelp.rating - a.yelp.rating;
+      case "google_rating":
+        return nullSafeDescending(a.google.rating, b.google.rating);
       case "google_reviews":
         return nullSafeDescending(a.google.review_count, b.google.review_count);
       default:
@@ -51,6 +54,16 @@ export function getSortedRestaurants(restaurants: Restaurant[], sortKey: SortKey
     }
   });
   return sorted;
+}
+
+function SortIcon({ active, disabled }: { active: boolean; disabled: boolean }) {
+  const fill = disabled ? "#d4d4d8" : active ? "#18181b" : "#a1a1aa";
+
+  return (
+    <svg width="8" height="6" viewBox="0 0 8 6" fill="none" aria-hidden="true" className="shrink-0">
+      <path d="M4 6L0 0H8L4 6Z" fill={fill} />
+    </svg>
+  );
 }
 
 function SortButton({
@@ -68,11 +81,11 @@ function SortButton({
     <button
       type="button"
       disabled={disabled}
-      className={`text-left ${disabled ? "cursor-default text-zinc-400" : active ? "font-semibold text-zinc-900" : "text-zinc-700"}`}
+      className={`inline-flex items-center gap-1 text-left ${disabled ? "cursor-default text-zinc-400" : active ? "font-semibold text-zinc-900" : "text-zinc-700"}`}
       onClick={onClick}
     >
-      {label}
-      {active && !disabled ? " ↓" : ""}
+      <span>{label}</span>
+      <SortIcon active={active} disabled={disabled} />
     </button>
   );
 }
@@ -84,8 +97,10 @@ export function RestaurantTable({
   isGoogleOnly = false,
   onMapOpen,
 }: RestaurantTableProps) {
-  const sortedRestaurants = getSortedRestaurants(restaurants, sortKey);
-
+  const sortedRestaurants = useMemo(
+    () => getSortedRestaurants(restaurants, sortKey),
+    [restaurants, sortKey],
+  );
   return (
     <div className="w-full rounded border border-zinc-200 bg-white p-4">
       <div>
@@ -117,7 +132,13 @@ export function RestaurantTable({
                   disabled={isGoogleOnly}
                 />
               </th>
-              <th className="w-16 px-1.5 py-2">Google Rating</th>
+              <th className="w-16 px-1.5 py-2">
+                <SortButton
+                  label="Google Rating"
+                  active={sortKey === "google_rating"}
+                  onClick={() => onSortKeyChange("google_rating")}
+                />
+              </th>
               <th className="w-24 px-1.5 py-2">
                 <SortButton
                   label="Google Reviews"

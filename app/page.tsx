@@ -66,7 +66,7 @@ export default function Home() {
   const [city, setCity] = useState("");
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
   const [warnings, setWarnings] = useState<SearchWarning[]>([]);
-  const [sortKey, setSortKey] = useState<SortKey>("combined_score");
+  const [sortKey, setSortKey] = useState<SortKey>("yelp_reviews");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchedCity, setSearchedCity] = useState<string | null>(null);
@@ -145,7 +145,7 @@ export default function Home() {
       setWarnings(payload.warnings);
       setSearchedCity(payload.city || trimmedCity);
       setIsGoogleOnly(payload.google_only === true);
-      setSortKey("combined_score");
+      setSortKey(payload.google_only === true ? "google_reviews" : "yelp_reviews");
       activeResultsRef.current =
         payload.restaurants.length > 0
           ? {
@@ -184,16 +184,41 @@ export default function Home() {
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
       <main className="flex flex-col gap-4">
-        <header>
-          <h1 className="text-2xl font-semibold text-zinc-900">Claire Eats</h1>
-          <p className="mt-1 text-sm text-zinc-600">Research restaurants by city — Yelp and Google in one view.</p>
-        </header>
-        <SearchBar
-          value={city}
-          onValueChange={setCity}
-          onSubmit={handleSearch}
-          isLoading={isLoading}
-        />
+        <section className="relative overflow-hidden rounded-2xl border-[0.5px] border-[#E8DAD0] bg-[#FBF5F0] p-10">
+          <div className="pointer-events-none absolute -right-10 -top-14 h-44 w-44 rounded-full bg-[#C4342D] opacity-[0.04]" />
+          <div className="pointer-events-none absolute right-10 top-10 h-20 w-20 rounded-full bg-[#C4342D] opacity-[0.06]" />
+
+          <header className="relative z-10 mb-6">
+            <div className="mb-4 inline-flex items-center gap-2.5">
+              <span
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-[#C4342D]"
+                aria-hidden="true"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" className="text-white">
+                  <path
+                    d="M7 3V11M5 3V7M9 3V7M7 11V21M16 3V9L14 11V21M19 3V21"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <span className="text-[14px] font-semibold tracking-[0.08em] text-[#C4342D]">RESTAURANT RANKINGS</span>
+            </div>
+            <h1 className="text-[34px] font-medium leading-none text-[#2C1810]">Claire Eats</h1>
+            <p className="mt-3 text-[14px] text-[#8A7060]">Research restaurants by city — Yelp and Google in one view.</p>
+          </header>
+
+          <div className="relative z-10 max-w-3xl">
+            <SearchBar
+              value={city}
+              onValueChange={setCity}
+              onSubmit={handleSearch}
+              isLoading={isLoading}
+            />
+          </div>
+        </section>
 
         {isGoogleOnly && restaurants.length > 0 && (
           <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800" aria-live="polite">

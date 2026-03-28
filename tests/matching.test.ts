@@ -41,6 +41,8 @@ describe("resolveGoogleEnrichment", () => {
     name: "Tartine Bakery",
     lat: 37.7615,
     lng: -122.4241,
+    address: "600 Guerrero St, San Francisco, CA 94110",
+    postal_code: "94110",
   };
 
   it("accepts candidate by name overlap", () => {
@@ -69,6 +71,68 @@ describe("resolveGoogleEnrichment", () => {
     });
 
     expect(enrichment.place_id).toBe("place-456");
+  });
+
+  it("accepts candidate by address similarity even when names differ", () => {
+    const enrichment = resolveGoogleEnrichment(yelpRestaurant, {
+      name: "Guerrero Cafe and Bakery",
+      lat: null,
+      lng: null,
+      rating: 4.4,
+      user_ratings_total: 530,
+      place_id: "place-address-1",
+      address: "600 Guerrero Street, San Francisco, CA 94110",
+      postal_code: "94110",
+    });
+
+    expect(enrichment.place_id).toBe("place-address-1");
+  });
+
+  it("selects best candidate from top candidates, not just first", () => {
+    const enrichment = resolveGoogleEnrichment(yelpRestaurant, [
+      {
+        name: "Tartin Cafe",
+        lat: 37.79,
+        lng: -122.48,
+        rating: 4.0,
+        user_ratings_total: 100,
+        place_id: "wrong-first",
+        address: "1 Market St, San Francisco, CA 94105",
+        postal_code: "94105",
+      },
+      {
+        name: "Tartine Bakery",
+        lat: 37.7616,
+        lng: -122.4242,
+        rating: 4.7,
+        user_ratings_total: 3300,
+        place_id: "best-second",
+        address: "600 Guerrero St, San Francisco, CA 94110",
+        postal_code: "94110",
+      },
+    ]);
+
+    expect(enrichment.place_id).toBe("best-second");
+  });
+
+  it("rejects weak nearby candidate when overall confidence is too low", () => {
+    const enrichment = resolveGoogleEnrichment(yelpRestaurant, {
+      name: "Unrelated Place",
+      lat: 37.7624,
+      lng: -122.4241,
+      rating: 4.0,
+      user_ratings_total: 90,
+      place_id: "weak-nearby",
+      address: "999 Some Other Ave, San Francisco, CA 94107",
+      postal_code: "94107",
+    });
+
+    expect(enrichment).toEqual({
+      rating: null,
+      review_count: null,
+      place_id: null,
+      maps_url: null,
+    });
   });
 
   it("rejects candidate when no name overlap and no nearby coordinate", () => {

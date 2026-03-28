@@ -129,6 +129,11 @@ describe("Phase 1 route guards", () => {
             price: "$$$",
             categories: [{ title: " Italian " }, { title: "Pasta" }],
             coordinates: { latitude: 37.77, longitude: -122.42 },
+            location: {
+              address1: "100 Test St",
+              zip_code: "94103",
+              display_address: ["100 Test St", "San Francisco, CA 94103"],
+            },
           },
           {
             id: "invalid-1",
@@ -167,8 +172,106 @@ describe("Phase 1 route guards", () => {
         categories: ["Italian", "Pasta"],
         lat: 37.77,
         lng: -122.42,
+        address: "100 Test St, San Francisco, CA 94103",
+        postal_code: "94103",
       },
     });
+  });
+
+  it("fetches top 50 Yelp rows sorted by review_count", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const businesses = Array.from({ length: 50 }, (_, index) => ({
+      id: `row-${index + 1}`,
+      name: `Restaurant ${index + 1}`,
+      rating: 4.0,
+      review_count: 1000 - index,
+      price: "$$",
+      categories: [{ title: "Test" }],
+      coordinates: { latitude: 37.7 + index * 0.0001, longitude: -122.4 },
+      location: {
+        address1: `${index + 1} Market St`,
+        zip_code: "94103",
+        display_address: [`${index + 1} Market St`, "San Francisco, CA 94103"],
+      },
+    }));
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("limit")).toBe("50");
+      expect(url.searchParams.get("term")).toBe("restaurants");
+      expect(url.searchParams.get("sort_by")).toBe("review_count");
+      return Response.json({ businesses });
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/yelp", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await yelpPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(payload.restaurants).toHaveLength(50);
+    expect(payload.restaurants[0].yelp.review_count).toBeGreaterThanOrEqual(payload.restaurants[49].yelp.review_count);
+  });
+
+  it("uses location-biased query and picks best candidate from top results", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async () => {
+      return Response.json({
+        status: "OK",
+        results: [
+          {
+            name: "Alpha Wrong Location",
+            rating: 4.1,
+            user_ratings_total: 150,
+            place_id: "wrong-first",
+            formatted_address: "1 Far Away Rd, San Francisco, CA 94105",
+            geometry: { location: { lat: 37.79, lng: -122.48 } },
+          },
+          {
+            name: "Restaurant Alpha",
+            rating: 4.7,
+            user_ratings_total: 1000,
+            place_id: "best-second",
+            formatted_address: "500 Howard St, San Francisco, CA 94105",
+            geometry: { location: { lat: 37.789, lng: -122.394 } },
+          },
+        ],
+      });
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/google", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Restaurant Alpha",
+        city: "San Francisco",
+        lat: 37.789,
+        lng: -122.394,
+        address: "500 Howard St",
+        postal_code: "94105",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await googlePost(request);
+    const payload = await response.json();
+
+    const requestUrl = new URL(String(fetchMock.mock.calls[0][0]));
+    expect(requestUrl.searchParams.get("location")).toBe("37.789,-122.394");
+    expect(requestUrl.searchParams.get("radius")).toBe("500");
+    expect(response.status).toBe(200);
+    expect(payload.ok).toBe(true);
+    expect(payload.google.place_id).toBe("best-second");
   });
 });
 
@@ -269,8 +372,8 @@ describe("search orchestrator", () => {
     ]);
   });
 
-  it("enriches only top 20 Yelp rows", async () => {
-    const yelpRows = Array.from({ length: 25 }, (_, index) => ({
+  it("enriches up to top 50 Yelp rows", async () => {
+    const yelpRows = Array.from({ length: 60 }, (_, index) => ({
       id: `y${index + 1}`,
       name: `Restaurant ${index + 1}`,
       city: "San Francisco",
@@ -321,13 +424,13 @@ describe("search orchestrator", () => {
     const payload = await response.json();
 
     expect(response.status).toBe(200);
-    expect(payload.restaurants).toHaveLength(25);
+    expect(payload.restaurants).toHaveLength(60);
 
     const googleCallCount = fetchMock.mock.calls.filter(([arg]) =>
       String(arg).endsWith("/api/google"),
     ).length;
 
-    expect(googleCallCount).toBe(20);
+    expect(googleCallCount).toBe(50);
   });
 
   it("keeps Yelp timeout status as 504 on upstream timeout failures", async () => {

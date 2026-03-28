@@ -1,27 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeCombinedScores, computeRawCombinedScore, normalizeScoreToTenPointScale } from "../lib/scoring";
+import { computeCombinedScores, computeRawCombinedScore } from "../lib/scoring";
 import type { Restaurant } from "../lib/types";
 
-describe("normalizeScoreToTenPointScale", () => {
-  it("returns a neutral score when range is degenerate", () => {
-    expect(normalizeScoreToTenPointScale(42, 10, 10)).toBe(5);
-    expect(normalizeScoreToTenPointScale(42, 11, 10)).toBe(5);
-  });
-
-  it("normalizes values to a 0-10 scale", () => {
-    expect(normalizeScoreToTenPointScale(10, 0, 20)).toBe(5);
-    expect(normalizeScoreToTenPointScale(0, 0, 20)).toBe(0);
-    expect(normalizeScoreToTenPointScale(20, 0, 20)).toBe(10);
-  });
-
-  it("clamps out-of-range values to 0-10", () => {
-    expect(normalizeScoreToTenPointScale(-5, 0, 20)).toBe(0);
-    expect(normalizeScoreToTenPointScale(25, 0, 20)).toBe(10);
-  });
-});
-
 describe("computeRawCombinedScore", () => {
-  it("uses both Yelp and Google when both are available", () => {
+  it("uses equal Yelp/Google weighting on a 10-point scale", () => {
     const score = computeRawCombinedScore({
       yelp: {
         rating: 4.5,
@@ -39,11 +21,11 @@ describe("computeRawCombinedScore", () => {
       },
     });
 
-    expect(score).not.toBeNull();
-    expect(score as number).toBeGreaterThan(0);
+    // Yelp 4.5 -> 9.0, Google 4.2 -> 8.4, equal-weight average -> 8.7
+    expect(score).toBeCloseTo(8.7);
   });
 
-  it("falls back to Yelp-only score when Google is missing", () => {
+  it("falls back to Yelp-only 10-point score when Google is missing", () => {
     const score = computeRawCombinedScore({
       yelp: {
         rating: 4.5,
@@ -61,7 +43,70 @@ describe("computeRawCombinedScore", () => {
       },
     });
 
-    expect(score).toBeCloseTo(4.5 * Math.log(100 + 1));
+    expect(score).toBeCloseTo(9.0);
+  });
+
+  it("falls back to Google-only score when Yelp has placeholder zeros", () => {
+    const score = computeRawCombinedScore({
+      yelp: {
+        rating: 0,
+        review_count: 0,
+        price: null,
+        categories: [],
+        lat: 0,
+        lng: 0,
+      },
+      google: {
+        rating: 4.3,
+        review_count: 200,
+        place_id: "p1",
+        maps_url: null,
+      },
+    });
+
+    expect(score).toBeCloseTo(8.6);
+  });
+
+  it("returns null when both sources have no real ratings", () => {
+    const score = computeRawCombinedScore({
+      yelp: {
+        rating: 0,
+        review_count: 0,
+        price: null,
+        categories: [],
+        lat: 0,
+        lng: 0,
+      },
+      google: {
+        rating: null,
+        review_count: null,
+        place_id: null,
+        maps_url: null,
+      },
+    });
+
+    expect(score).toBeNull();
+  });
+
+  it("treats Google as missing when review_count is 0", () => {
+    const score = computeRawCombinedScore({
+      yelp: {
+        rating: 4.0,
+        review_count: 50,
+        price: "$$",
+        categories: [],
+        lat: 0,
+        lng: 0,
+      },
+      google: {
+        rating: 4.5,
+        review_count: 0,
+        place_id: null,
+        maps_url: null,
+      },
+    });
+
+    expect(score).toBeCloseTo(8.0);
   });
 });
 
@@ -94,7 +139,7 @@ describe("computeCombinedScores", () => {
     };
   }
 
-  it("returns normalized 0-10 scores rounded to one decimal", () => {
+  it("returns absolute 10-point scores rounded to one decimal", () => {
     const scored = computeCombinedScores([
       makeRestaurant("a", 50, 4.0, null),
       makeRestaurant("b", 300, 4.7, 500),
@@ -108,5 +153,9 @@ describe("computeCombinedScores", () => {
       expect(restaurant.combined_score as number).toBeGreaterThanOrEqual(0);
       expect(restaurant.combined_score as number).toBeLessThanOrEqual(10);
     }
+
+    expect(scored[0].combined_score).toBe(8);
+    expect(scored[1].combined_score).toBe(8.9);
+    expect(scored[2].combined_score).toBe(8.4);
   });
 });

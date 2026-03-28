@@ -5,10 +5,11 @@ import { buildMapsUrl, rejectGoogleEnrichment } from "@/lib/matching";
 import { matchMichelinForRestaurant } from "@/lib/michelin";
 import { computeCombinedScores } from "@/lib/scoring";
 
-const MAX_GOOGLE_ENRICHMENTS = 20;
+const MAX_GOOGLE_ENRICHMENTS = 50;
 const GOOGLE_CONCURRENCY = 5;
 const GOOGLE_REQUEST_TIMEOUT_MS = 3000;
-const ENRICHMENT_BUDGET_MS = 6000;
+const ENRICHMENT_BUDGET_MS =
+  Math.ceil((MAX_GOOGLE_ENRICHMENTS / GOOGLE_CONCURRENCY) * GOOGLE_REQUEST_TIMEOUT_MS) + 1000;
 const GOOGLE_FALLBACK_LIMIT = 20;
 const GOOGLE_FALLBACK_TIMEOUT_MS = 5000;
 const GOOGLE_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json";
@@ -26,6 +27,8 @@ type YelpSeed = {
     categories: string[];
     lat: number;
     lng: number;
+    address?: string | null;
+    postal_code?: string | null;
   };
 };
 
@@ -315,6 +318,8 @@ export async function POST(request: Request) {
             city,
             lat: restaurant.yelp.lat,
             lng: restaurant.yelp.lng,
+            address: restaurant.yelp.address ?? null,
+            postal_code: restaurant.yelp.postal_code ?? null,
           }),
           signal: timeout.signal,
           cache: "no-store",

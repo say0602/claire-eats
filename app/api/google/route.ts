@@ -11,6 +11,8 @@ type GoogleTextSearchResult = {
   rating?: number;
   user_ratings_total?: number;
   place_id?: string;
+  formatted_address?: string;
+  vicinity?: string;
   geometry?: {
     location?: {
       lat?: number;
@@ -64,6 +66,8 @@ export async function POST(request: Request) {
   let city = "";
   let lat: number | null = null;
   let lng: number | null = null;
+  let address: string | null = null;
+  let postalCode: string | null = null;
 
   try {
     const body = await request.json();
@@ -71,6 +75,8 @@ export async function POST(request: Request) {
     city = typeof body?.city === "string" ? body.city.trim() : "";
     lat = typeof body?.lat === "number" ? body.lat : null;
     lng = typeof body?.lng === "number" ? body.lng : null;
+    address = typeof body?.address === "string" ? body.address.trim() : null;
+    postalCode = typeof body?.postal_code === "string" ? body.postal_code.trim() : null;
   } catch {
     return NextResponse.json(
       { error: { code: "INVALID_INPUT", message: "Request body must be valid JSON." } },
@@ -98,9 +104,13 @@ export async function POST(request: Request) {
     throw error;
   }
 
-  const query = `${name} ${city}`;
+  const query = [name, address, postalCode, city].filter((part): part is string => Boolean(part)).join(" ");
   const url = new URL(GOOGLE_TEXT_SEARCH_URL);
   url.searchParams.set("query", query);
+  if (lat !== null && lng !== null) {
+    url.searchParams.set("location", `${lat},${lng}`);
+    url.searchParams.set("radius", "500");
+  }
   url.searchParams.set("key", apiKey);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -146,24 +156,26 @@ export async function POST(request: Request) {
         return NextResponse.json(createFallback(code, message));
       }
 
-      const first = payload.results?.[0];
+      const topCandidates = (payload.results ?? []).slice(0, 5).map((result) => ({
+        name: result.name ?? null,
+        lat: result.geometry?.location?.lat ?? null,
+        lng: result.geometry?.location?.lng ?? null,
+        rating: result.rating ?? null,
+        user_ratings_total: result.user_ratings_total ?? null,
+        place_id: result.place_id ?? null,
+        address: result.formatted_address ?? result.vicinity ?? null,
+        postal_code: null,
+      }));
 
       const enrichment = resolveGoogleEnrichment(
         {
           name,
           lat,
           lng,
+          address,
+          postal_code: postalCode,
         },
-        first
-          ? {
-              name: first.name ?? null,
-              lat: first.geometry?.location?.lat ?? null,
-              lng: first.geometry?.location?.lng ?? null,
-              rating: first.rating ?? null,
-              user_ratings_total: first.user_ratings_total ?? null,
-              place_id: first.place_id ?? null,
-            }
-          : null,
+        topCandidates,
       );
 
       return NextResponse.json({ ok: true, google: enrichment });
