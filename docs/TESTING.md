@@ -69,6 +69,11 @@ Minimum gate for pull requests:
 2. `npm.cmd run build`
 3. `npm.cmd run test:ci`
 
+For Phase 1 route/backend changes, ensure tests cover:
+- Yelp normalization and required-field filtering behavior
+- Google fallback codes (`GOOGLE_TIMEOUT`, `GOOGLE_RATE_LIMITED`, `GOOGLE_UPSTREAM_ERROR`)
+- Search route warning propagation and top-20 enrichment cap
+
 ---
 
 ## 7. Notes for Agents

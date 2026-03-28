@@ -1,39 +1,11 @@
----
-title: "Claire Eats Implementation Plan (MVP -> Phase 1.5)"
-status: active # draft | active | implemented | abandoned
-date: 2026-03-23
-app: "claire-eats"
-tags: ["nextjs", "api", "table-ui", "yelp", "google-places", "michelin"]
----
 
-# Claire Eats Implementation Plan (MVP -> Phase 1.5)
-
-## AI Context
-
-*Key files and directories the implementing agent should read first.*
-
-**Architecture / setup docs (include when relevant to the work):**
-- `docs/PRD.md`
-- `docs/_TEMPLATE.md` (if present)
-- `docs/TESTING.md`
-
-**Plan-specific files:**
-- `docs/IMPLEMENTATION_PLAN.md`
-- `app/page.tsx` (to be created)
-- `app/api/search/route.ts` (to be created)
-- `app/api/yelp/route.ts` (to be created)
-- `app/api/google/route.ts` (to be created)
-- `app/api/config/route.ts` (created in Phase 0 for runtime env validation)
-- `components/SearchBar.tsx` (to be created)
-- `components/RestaurantTable.tsx` (to be created)
-- `components/MichelinBadge.tsx` (to be created)
-- `components/ScorePill.tsx` (to be created)
-- `lib/types.ts` (to be created)
-- `lib/matching.ts` (to be created)
-- `lib/scoring.ts` (to be created)
-- `lib/michelin.ts` (to be created)
-- `data/michelin.json` (to be created)
-- `scripts/convert-michelin.ts` (to be created)
+- `components/ScorePill.tsx` (created)
+- `lib/types.ts` (created)
+- `lib/matching.ts` (created)
+- `lib/scoring.ts` (created)
+- `lib/michelin.ts` (created)
+- `data/michelin.json` (created)
+- `scripts/convert-michelin.ts` (created)
 
 ## Goal
 
@@ -148,12 +120,12 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 
 ### Phase 1 - MVP Core (Day 1-5)
 
-1. [ ] **Implement Yelp proxy endpoint (`app/api/yelp/route.ts`)**
+1. [x] **Implement Yelp proxy endpoint (`app/api/yelp/route.ts`)**
    - Input: `city` string.
    - Output: normalized Yelp restaurant list with required fields.
    - Add timeout and clear upstream failure mapping.
 
-2. [ ] **Implement Google proxy endpoint (`app/api/google/route.ts`)**
+2. [x] **Implement Google proxy endpoint (`app/api/google/route.ts`)**
    - Input: `{ name, city, lat?, lng? }`.
    - Query Places Text Search using `"{restaurant_name} {city}"`.
    - Return first candidate payload with required enrichment fields.
@@ -163,12 +135,12 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
    - Handle quota and upstream failures (`429`/`5xx`) with typed fallback responses.
    - Apply timeout `2500ms`; retry once on `429`/`5xx` using backoff + jitter.
 
-3. [ ] **Implement matching logic (`lib/matching.ts`)**
+3. [x] **Implement matching logic (`lib/matching.ts`)**
    - Name-overlap helper.
    - Distance helper with 100m Google acceptance threshold.
    - Result acceptance/rejection function returning either normalized google data or nulls.
 
-4. [ ] **Implement orchestrator endpoint (`app/api/search/route.ts`)**
+4. [x] **Implement orchestrator endpoint (`app/api/search/route.ts`)**
    - Validate input.
    - Fetch Yelp list.
    - Enrich top `20` Yelp rows with Google using bounded concurrency (`5` max).
@@ -179,15 +151,38 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
      - success: `{ city, restaurants, warnings }`
      - failure: `{ city, restaurants: [], warnings, error: { code, message } }`
 
-5. [ ] **Build search + table UI**
+**Phase 1 (Steps 1-4) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass
+- Route tests verify:
+  - Yelp row normalization + coordinate filtering
+  - Google retry/fallback behavior (`OVER_QUERY_LIMIT`, `5xx`, timeout paths)
+  - Search orchestrator caps enrichment to top `20` and preserves Yelp rows on partial failures
+
+5. [x] **Build search + table UI**
    - `components/SearchBar.tsx`: city input, submit button, Enter key behavior.
    - `components/RestaurantTable.tsx`: render MVP columns and sortable headers.
    - `app/page.tsx`: state wiring, loading, empty, and error states.
 
-6. [ ] **MVP sorting and formatting**
+6. [x] **MVP sorting and formatting**
    - Default sort by Yelp review count.
    - Add helper formatting for counts and fallback placeholders (`-`).
    - Ensure map link button opens valid Google Maps URL when available.
+
+**Phase 1 (Steps 5-6) verification snapshot (2026-03-25)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass
+- Note: additional UI-focused tests were added after initial MVP cut (network error handling, sort switching).
+- UI checks implemented:
+  - Search form submit + Enter key behavior
+  - Loading / empty / error states
+  - Sortable table headers with default Yelp review sort
+  - Review count formatting (`4.2k`) and fallback placeholders (`-`)
+  - Google map deep-link button only when `maps_url` exists
 
 **Phase 1 UI scope (explicit):**
 
@@ -204,27 +199,43 @@ Scope note: in `docs/PRD.md`, the "MVP flow" section describes the end-to-end id
 - **Not in Phase 1**
   - `Michelin` column
   - `Score` / combined score column
+  - Sort by `Google Reviews` (deferred to Phase 1.5A; Phase 1 displays Google counts but keeps sorting Yelp-first)
+
+**Local setup notes (discovered during Phase 1 verification)**
+
+- Copy `.env.example` to `.env.local` (preferred) or `.env` (also works locally) and set:
+  - `YELP_API_KEY`
+  - `GOOGLE_MAPS_API_KEY`
+- Google Places requests in this app are made server-side via `app/api/google/route.ts`.
+  - A Google API key restricted to **HTTP referrers (websites)** will be rejected with `REQUEST_DENIED`.
+  - Use an unrestricted server key (or IP-restricted key in production) with Places enabled and billing active.
 
 ### Phase 1.5A - Data Value (Day 5-6)
 
-1. [ ] **Michelin data pipeline**
+1. [x] **Michelin data pipeline**
    - Create `scripts/convert-michelin.ts` to transform source data into app-ready JSON.
    - Generate and store `data/michelin.json` in a city-indexed shape for fast lookups.
    - Add schema validation for generated output.
 
-2. [ ] **Michelin matching runtime (`lib/michelin.ts`)**
+2. [x] **Michelin matching runtime (`lib/michelin.ts`)**
    - Load/filter Michelin data by city.
    - Nearest-neighbor coordinate match with 80m threshold.
    - Return `{ award, green_star, matched }` or empty values.
 
-3. [ ] **Scoring engine (`lib/scoring.ts`)**
+3. [x] **Scoring engine (`lib/scoring.ts`)**
    - Implement raw formula from PRD.
    - Handle single-source fallback if one provider is missing.
    - Min-max normalize score to 0-10 and round to 1 decimal.
 
-4. [ ] **Integrate Michelin + score into search response**
+4. [x] **Integrate Michelin + score into search response**
    - Extend orchestrator output with `michelin` and `combined_score`.
    - Keep Michelin non-blocking so rows still render if no match exists.
+
+**Phase 1.5A (Steps 1-4) verification snapshot (2026-03-24)**
+
+- `npm.cmd run lint` -> pass
+- `npm.cmd run build` -> pass
+- `npm.cmd run test:ci` -> pass
 
 5. [ ] **UI upgrades**
    - Add `MichelinBadge.tsx` and `ScorePill.tsx`.
