@@ -56,6 +56,7 @@ const DYNAMIC_CITY_CACHE_MAX_ENTRIES_DEFAULT = 200;
 const SNAPSHOT_VERSION_DEFAULT = "pilot-v1";
 const SNAPSHOT_MAX_AGE_MINUTES_DEFAULT = 24 * 60;
 const SNAPSHOT_MANIFEST_CACHE_TTL_MS = 60_000;
+const SNAPSHOT_ALLOW_STALE_PUBLIC_DEFAULT = true;
 
 function devLog(...args: unknown[]) {
   if (process.env.NODE_ENV !== "development") return;
@@ -558,6 +559,37 @@ function normalizeBaseUrl(url: string) {
   return url.replace(/\/+$/, "");
 }
 
+function parseSnapshotAllowStalePublic() {
+  const raw = process.env.SEARCH_SNAPSHOT_ALLOW_STALE_PUBLIC;
+  if (!raw) return SNAPSHOT_ALLOW_STALE_PUBLIC_DEFAULT;
+  const normalized = raw.trim().toLowerCase();
+  if (["0", "false", "off", "no"].includes(normalized)) return false;
+  if (["1", "true", "on", "yes"].includes(normalized)) return true;
+  return SNAPSHOT_ALLOW_STALE_PUBLIC_DEFAULT;
+}
+
+function getSnapshotOrigin(request: Request) {
+  const configuredOrigin = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (configuredOrigin) return normalizeBaseUrl(configuredOrigin);
+
+  try {
+    const url = new URL(request.url);
+    if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      return url.origin;
+    }
+  } catch {
+    // Ignore malformed request URL and fall through to header-derived origin.
+  }
+
+  const forwardedHost = request.headers.get("x-forwarded-host") || request.headers.get("host");
+  if (forwardedHost) {
+    const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
+    return `${forwardedProto}://${forwardedHost}`;
+  }
+
+  return "http://localhost";
+}
+
 function getSnapshotHttpBaseUrl(origin: string) {
   const configured = process.env.SEARCH_SNAPSHOT_HTTP_BASE_URL?.trim();
   if (configured) return normalizeBaseUrl(configured);
@@ -728,7 +760,7 @@ async function tryLoadCitySnapshot(city: string, origin: string) {
     process.env.SEARCH_SNAPSHOT_MAX_AGE_MINUTES,
     SNAPSHOT_MAX_AGE_MINUTES_DEFAULT,
   );
-  if (ageMinutes !== null && ageMinutes > maxAgeMinutes) return null;
+  if (ageMinutes !== null && ageMinutes > maxAgeMinutes && !parseSnapshotAllowStalePublic()) return null;
   const googleOnly = parseBooleanString(rows[0]?.["Google Only"]);
 
   return {
@@ -1765,7 +1797,7 @@ export async function POST(request: Request) {
     });
   }
   const appProfile = getServerAppProfile();
-  const origin = new URL(request.url).origin;
+  const origin = getSnapshotOrigin(request);
 
   const snapshot = await tryLoadCitySnapshot(city, origin);
   if (snapshot) {

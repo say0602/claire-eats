@@ -3244,4 +3244,52 @@ describe("search orchestrator", () => {
 
     await fs.rm(versionDir, { recursive: true, force: true });
   });
+
+  it("serves stale snapshot in public mode by default instead of falling back to live path", async () => {
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "1";
+    process.env.SEARCH_SNAPSHOT_VERSION = "test-stale-snapshot-default";
+    process.env.SEARCH_SNAPSHOT_MAX_AGE_MINUTES = "0";
+
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const versionDir = path.join(process.cwd(), "data", "precompute", "test-stale-snapshot-default");
+    await fs.mkdir(versionDir, { recursive: true });
+
+    const oldIso = "2024-01-01T00:00:00.000Z";
+    const summary = {
+      version: "test-stale-snapshot-default",
+      finished_at_utc: oldIso,
+      results: [{ city: "San Francisco, CA", slug: "san-francisco-ca", success: true }],
+    };
+    await fs.writeFile(path.join(versionDir, "_run-summary.json"), JSON.stringify(summary), "utf8");
+    await fs.writeFile(
+      path.join(versionDir, "san-francisco-ca.csv"),
+      [
+        "Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL,Snapshot UTC,Google Only",
+        `1,Old Snapshot Place,8.9,1000,4.6,500,4.7,500,$$,American,\"San Francisco, CA\",https://www.google.com/maps/place/?q=place_id:old-snapshot,${oldIso},false`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    global.fetch = vi.fn(async () => {
+      throw new Error("Expected stale snapshot to be served without live fetch.");
+    }) as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco, CA" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("Old Snapshot Place");
+
+    await fs.rm(versionDir, { recursive: true, force: true });
+  });
 });
