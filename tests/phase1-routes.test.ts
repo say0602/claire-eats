@@ -3341,4 +3341,51 @@ describe("search orchestrator", () => {
 
     await fs.rm(versionDir, { recursive: true, force: true });
   });
+
+  it("falls back to default snapshot version when configured version is missing", async () => {
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "1";
+    process.env.SEARCH_SNAPSHOT_VERSION = "missing-version";
+
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const versionDir = path.join(process.cwd(), "data", "precompute", "pilot-v1");
+    await fs.mkdir(versionDir, { recursive: true });
+
+    const nowIso = new Date().toISOString();
+    const summary = {
+      version: "pilot-v1",
+      finished_at_utc: nowIso,
+      results: [{ city: "San Francisco, CA", slug: "san-francisco-ca", success: true }],
+    };
+    await fs.writeFile(path.join(versionDir, "_run-summary.json"), JSON.stringify(summary), "utf8");
+    await fs.writeFile(
+      path.join(versionDir, "san-francisco-ca.csv"),
+      [
+        "Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL,Snapshot UTC,Google Only",
+        `1,Default Version Snapshot,8.7,800,4.4,320,4.6,480,$$,American,\"San Francisco, CA\",https://www.google.com/maps/place/?q=place_id:default-version,${nowIso},false`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    global.fetch = vi.fn(async () => {
+      throw new Error("Expected snapshot fallback to avoid live fetch.");
+    }) as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco, CA" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("Default Version Snapshot");
+
+    await fs.rm(versionDir, { recursive: true, force: true });
+  });
 });

@@ -721,11 +721,7 @@ function buildSnapshotRestaurant(row: Record<string, string>, index: number, fal
   } satisfies Restaurant;
 }
 
-async function tryLoadCitySnapshot(city: string, origin: string) {
-  if (getServerAppProfile() !== "public") return null;
-  if (!parseSnapshotEnabled()) return null;
-
-  const version = process.env.SEARCH_SNAPSHOT_VERSION || SNAPSHOT_VERSION_DEFAULT;
+async function tryLoadCitySnapshotForVersion(city: string, origin: string, version: string) {
   const manifest = await loadSnapshotManifest(version, origin);
   if (!manifest) return null;
 
@@ -789,6 +785,23 @@ async function tryLoadCitySnapshot(city: string, origin: string) {
     ageMinutes,
     googleOnly,
   };
+}
+
+async function tryLoadCitySnapshot(city: string, origin: string) {
+  if (getServerAppProfile() !== "public") return null;
+  if (!parseSnapshotEnabled()) return null;
+
+  const preferredVersion = process.env.SEARCH_SNAPSHOT_VERSION?.trim() || SNAPSHOT_VERSION_DEFAULT;
+  if (preferredVersion === SNAPSHOT_VERSION_DEFAULT) {
+    return tryLoadCitySnapshotForVersion(city, origin, SNAPSHOT_VERSION_DEFAULT);
+  }
+
+  const preferredManifest = await loadSnapshotManifest(preferredVersion, origin);
+  if (preferredManifest) {
+    return tryLoadCitySnapshotForVersion(city, origin, preferredVersion);
+  }
+
+  return tryLoadCitySnapshotForVersion(city, origin, SNAPSHOT_VERSION_DEFAULT);
 }
 
 async function fetchGoogleEnrichment(
