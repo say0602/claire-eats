@@ -3162,6 +3162,55 @@ describe("search orchestrator", () => {
     );
   });
 
+  it("ignores localhost NEXT_PUBLIC_SITE_URL in deployed requests and uses request origin for snapshot HTTP fallback", async () => {
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "1";
+    process.env.SEARCH_SNAPSHOT_VERSION = "test-origin-fallback";
+    process.env.NEXT_PUBLIC_SITE_URL = "http://localhost:3000";
+    delete process.env.SEARCH_SNAPSHOT_HTTP_BASE_URL;
+
+    const nowIso = new Date().toISOString();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://eat.clairepark.ai/precompute/test-origin-fallback/_run-summary.json") {
+        return Response.json({
+          version: "test-origin-fallback",
+          finished_at_utc: nowIso,
+          results: [{ city: "San Francisco, CA", slug: "san-francisco-ca", success: true }],
+        });
+      }
+      if (url === "https://eat.clairepark.ai/precompute/test-origin-fallback/san-francisco-ca.csv") {
+        return new Response(
+          [
+            "Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL,Snapshot UTC,Google Only",
+            `1,Origin Fallback Snapshot,9.1,900,4.5,400,4.7,500,$$,American,\"San Francisco, CA\",https://www.google.com/maps/place/?q=place_id:origin-fallback,${nowIso},false`,
+          ].join("\n"),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("https://eat.clairepark.ai/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco, CA" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("Origin Fallback Snapshot");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://eat.clairepark.ai/precompute/test-origin-fallback/_run-summary.json",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+  });
+
   it("ignores malformed snapshot timestamp and falls back to live path", async () => {
     process.env.APP_PROFILE = "public";
     process.env.NEXT_PUBLIC_APP_PROFILE = "public";

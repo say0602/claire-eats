@@ -559,6 +559,10 @@ function normalizeBaseUrl(url: string) {
   return url.replace(/\/+$/, "");
 }
 
+function isLoopbackHost(hostname: string) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
 function parseSnapshotAllowStalePublic() {
   const raw = process.env.SEARCH_SNAPSHOT_ALLOW_STALE_PUBLIC;
   if (!raw) return SNAPSHOT_ALLOW_STALE_PUBLIC_DEFAULT;
@@ -570,11 +574,21 @@ function parseSnapshotAllowStalePublic() {
 
 function getSnapshotOrigin(request: Request) {
   const configuredOrigin = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (configuredOrigin) return normalizeBaseUrl(configuredOrigin);
+  if (configuredOrigin) {
+    try {
+      const configuredUrl = new URL(configuredOrigin);
+      const requestUrl = new URL(request.url);
+      if (!(isLoopbackHost(configuredUrl.hostname) && !isLoopbackHost(requestUrl.hostname))) {
+        return normalizeBaseUrl(configuredUrl.origin);
+      }
+    } catch {
+      // Ignore malformed NEXT_PUBLIC_SITE_URL and fall through.
+    }
+  }
 
   try {
     const url = new URL(request.url);
-    if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+    if (!isLoopbackHost(url.hostname)) {
       return url.origin;
     }
   } catch {
@@ -593,7 +607,14 @@ function getSnapshotOrigin(request: Request) {
 function getSnapshotHttpBaseUrl(origin: string) {
   const configured = process.env.SEARCH_SNAPSHOT_HTTP_BASE_URL?.trim();
   if (configured) return normalizeBaseUrl(configured);
-  if (process.env.NODE_ENV === "test") return null;
+  if (process.env.NODE_ENV === "test") {
+    try {
+      const url = new URL(origin);
+      if (isLoopbackHost(url.hostname)) return null;
+    } catch {
+      return null;
+    }
+  }
   return `${normalizeBaseUrl(origin)}/precompute`;
 }
 
