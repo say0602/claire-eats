@@ -172,6 +172,6 @@ describe("buildRestaurantsCsv", () => {
 
     expect(lines[0]).toBe("Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL");
     expect(lines[1]).toContain("1,Restaurant a,8.9,1300,4.3,100,4.5,1200");
-    expect(lines[2]).toContain("2,\"Comma, Quote \"\"Place\"\"\",9.2,900,-,-,4.6,900");
+    expect(lines[2]).toContain("2,\"Comma, Quote \"\"Place\"\"\",9.2,900,-,-,4.6,900,$$");
   });
 });

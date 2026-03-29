@@ -127,7 +127,7 @@ function buildPilotCsv(restaurants, { snapshotUtc, googleOnly }) {
       yelpMissing ? "" : (restaurant.yelp?.review_count ?? ""),
       restaurant.google?.rating == null ? "" : Number(restaurant.google.rating).toFixed(1),
       restaurant.google?.review_count ?? "",
-      yelpMissing ? "" : (restaurant.yelp?.price ?? ""),
+      restaurant.yelp?.price ?? "",
       Array.isArray(restaurant.yelp?.categories) ? restaurant.yelp.categories.join(", ") : "",
       restaurant.city ?? "",
       restaurant.google?.maps_url ?? "",

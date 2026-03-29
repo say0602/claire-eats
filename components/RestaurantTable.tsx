@@ -66,7 +66,7 @@ export function buildRestaurantsCsv(restaurants: Restaurant[], isGoogleOnly = fa
       yelpMissing ? "-" : restaurant.yelp.review_count,
       restaurant.google.rating === null ? "-" : restaurant.google.rating.toFixed(1),
       restaurant.google.review_count ?? "-",
-      yelpMissing ? "-" : (restaurant.yelp.price ?? "-"),
+      restaurant.yelp.price ?? "-",
       restaurant.yelp.categories.length > 0 ? restaurant.yelp.categories.join(", ") : "-",
       restaurant.city,
       restaurant.google.maps_url ?? "-",
@@ -245,7 +245,7 @@ export function RestaurantTable({
           {sortedRestaurants.map((restaurant, index) => {
             const yelpHidden = showYelpPlaceholder(restaurant);
             const cuisine = formatCuisine(restaurant.yelp.categories);
-            const price = yelpHidden ? null : (restaurant.yelp.price ?? null);
+            const price = restaurant.yelp.price ?? null;
             const meta = [price, cuisine !== "-" ? cuisine : null].filter(Boolean).join(" · ");
 
             return (
@@ -417,7 +417,7 @@ export function RestaurantTable({
                 <td className="px-1.5 py-2">{showYelpPlaceholder(restaurant) ? "-" : formatReviewCount(restaurant.yelp.review_count)}</td>
                 <td className="px-1.5 py-2">{formatRating(restaurant.google.rating)}</td>
                 <td className="px-1.5 py-2">{formatReviewCount(restaurant.google.review_count)}</td>
-                <td className="px-1.5 py-2">{showYelpPlaceholder(restaurant) ? "-" : (restaurant.yelp.price ?? "-")}</td>
+                <td className="px-1.5 py-2">{restaurant.yelp.price ?? "-"}</td>
                 <td className="px-1.5 py-2">{formatCuisine(restaurant.yelp.categories)}</td>
                 <td className="px-1.5 py-2">
                   {restaurant.google.maps_url ? (

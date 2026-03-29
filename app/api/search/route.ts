@@ -36,7 +36,7 @@ const GOOGLE_PROMINENT_MAX_RESULTS = 60;
 const GOOGLE_PROMINENT_PAGE_TOKEN_DELAY_MS = 2100;
 const GOOGLE_PROMINENT_TOTAL_BUDGET_MS = 12_000;
 const GOOGLE_PLACES_NEW_FIELD_MASK =
-  "places.id,places.displayName,places.rating,places.userRatingCount,places.location,places.formattedAddress,places.types,nextPageToken";
+  "places.id,places.displayName,places.rating,places.userRatingCount,places.location,places.formattedAddress,places.priceLevel,places.types,nextPageToken";
 const YELP_HARD_FAIL_CODES = new Set(["CONFIG_ERROR", "YELP_RATE_LIMITED", "YELP_TIMEOUT"]);
 const GOOGLE_TYPE_SKIP = new Set(["point_of_interest", "establishment", "food", "restaurant"]);
 const YELP_PROMINENT_MATCH_DISTANCE_METERS = 500;
@@ -876,6 +876,28 @@ function toYelpPriceTier(value: string | undefined): Restaurant["yelp"]["price"]
   return null;
 }
 
+function toYelpPriceTierFromGoogle(value: unknown): Restaurant["yelp"]["price"] {
+  if (typeof value === "number") {
+    if (value <= 0) return null;
+    if (value === 1) return "$";
+    if (value === 2) return "$$";
+    if (value === 3) return "$$$";
+    return "$$$$";
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toUpperCase();
+    if (!normalized) return null;
+    if (normalized === "PRICE_LEVEL_FREE") return null;
+    if (normalized === "PRICE_LEVEL_INEXPENSIVE") return "$";
+    if (normalized === "PRICE_LEVEL_MODERATE") return "$$";
+    if (normalized === "PRICE_LEVEL_EXPENSIVE") return "$$$";
+    if (normalized === "PRICE_LEVEL_VERY_EXPENSIVE") return "$$$$";
+  }
+
+  return null;
+}
+
 function parseYelpAddress(location: YelpBusinessSearchResult["location"]) {
   const displayAddress = location?.display_address
     ?.map((line) => line.trim())
@@ -1210,6 +1232,7 @@ type GoogleTextSearchResult = {
   rating?: number;
   user_ratings_total?: number;
   place_id?: string;
+  price_level?: number;
   types?: string[];
   geometry?: { location?: { lat?: number; lng?: number } };
 };
@@ -1227,6 +1250,7 @@ type GooglePlacesNewResult = {
   rating?: number;
   userRating?: number;
   userRatingCount?: number;
+  priceLevel?: string | number;
   location?: { latitude?: number; longitude?: number };
   formattedAddress?: string;
   types?: string[];
@@ -1264,7 +1288,7 @@ function buildRestaurantFromGoogleResult(result: GoogleTextSearchResult, city: s
     yelp: {
       rating: 0,
       review_count: 0,
-      price: null,
+      price: toYelpPriceTierFromGoogle(result.price_level),
       categories: categoriesFromTypes(result.types),
       lat,
       lng,
@@ -1304,7 +1328,7 @@ function buildRestaurantFromGooglePlacesNewResult(
     yelp: {
       rating: 0,
       review_count: 0,
-      price: null,
+      price: toYelpPriceTierFromGoogle(result.priceLevel),
       categories: categoriesFromTypes(result.types),
       lat,
       lng,

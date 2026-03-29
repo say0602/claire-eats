@@ -3061,6 +3061,63 @@ describe("search orchestrator", () => {
     expect(payload.restaurants[0].combined_score).toBeNull();
   });
 
+  it("maps Google priceLevel into price for google-only fallback rows", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "Seoul",
+          restaurants: [],
+        });
+      }
+
+      if (url.includes("places.googleapis.com")) {
+        return Response.json({
+          places: [
+            {
+              id: "place-seoul-price-1",
+              displayName: { text: "Seoul Priced Spot" },
+              rating: 4.4,
+              userRatingCount: 980,
+              priceLevel: "PRICE_LEVEL_MODERATE",
+              location: { latitude: 37.5665, longitude: 126.978 },
+              formattedAddress: "Seoul",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      if (url.includes("maps.googleapis.com")) {
+        return Response.json({
+          status: "ZERO_RESULTS",
+          results: [],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Seoul" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants.length).toBeGreaterThan(0);
+    expect(payload.restaurants[0].yelp.price).toBe("$$");
+  });
+
   it("serves snapshot payload with google_only=true when snapshot marks Google Only", async () => {
     process.env.APP_PROFILE = "public";
     process.env.NEXT_PUBLIC_APP_PROFILE = "public";
