@@ -644,8 +644,12 @@ async function loadSnapshotManifest(version: string, origin: string) {
 
   try {
     const path = await import("node:path");
-    const summaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
-    const raw = (await tryReadFile(summaryPath)) ?? (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
+    const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
+    const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
+    const raw =
+      (await tryReadFile(dataSummaryPath)) ??
+      (await tryReadFile(publicSummaryPath)) ??
+      (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
     if (!raw) {
       snapshotManifestCache = {
         version,
@@ -740,8 +744,12 @@ async function tryLoadCitySnapshotForVersion(city: string, origin: string, versi
   }
 
   const path = await import("node:path");
-  const csvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
-  const rawCsv = (await tryReadFile(csvPath)) ?? (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
+  const dataCsvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
+  const publicCsvPath = path.join(process.cwd(), "public", "precompute", version, `${manifestEntry.slug}.csv`);
+  const rawCsv =
+    (await tryReadFile(dataCsvPath)) ??
+    (await tryReadFile(publicCsvPath)) ??
+    (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
   if (!rawCsv) return null;
 
   const lines = rawCsv

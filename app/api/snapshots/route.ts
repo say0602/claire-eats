@@ -69,8 +69,9 @@ type SnapshotSummary = {
 async function loadSnapshotSummary(request: Request, version: string): Promise<SnapshotSummary | null> {
   try {
     const path = await import("node:path");
-    const summaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
-    const rawFromDisk = await tryReadFile(summaryPath);
+    const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
+    const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
+    const rawFromDisk = (await tryReadFile(dataSummaryPath)) ?? (await tryReadFile(publicSummaryPath));
     const origin = getRequestOrigin(request);
     const raw =
       rawFromDisk ??
