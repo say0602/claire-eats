@@ -13,6 +13,7 @@ import {
 } from "@/lib/matching";
 import { matchMichelinForRestaurant } from "@/lib/michelin";
 import { computeCombinedScores } from "@/lib/scoring";
+import { getSnapshotSummary, getSnapshotCsv } from "@/lib/snapshot-data.generated";
 import { POST as yelpPost } from "@/app/api/yelp/route";
 import { POST as googlePost } from "@/app/api/google/route";
 
@@ -643,16 +644,19 @@ async function loadSnapshotManifest(version: string, origin: string) {
   }
 
   try {
+    const rawFromBundle = getSnapshotSummary(version);
     let rawFromDisk: string | null = null;
-    try {
-      const path = await import("node:path");
-      const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
-      const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
-      rawFromDisk = (await tryReadFile(dataSummaryPath)) ?? (await tryReadFile(publicSummaryPath));
-    } catch {
-      // filesystem unavailable (e.g. edge runtime), fall through to HTTP
+    if (!rawFromBundle) {
+      try {
+        const path = await import("node:path");
+        const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
+        const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
+        rawFromDisk = (await tryReadFile(dataSummaryPath)) ?? (await tryReadFile(publicSummaryPath));
+      } catch {
+        // filesystem unavailable, fall through to HTTP
+      }
     }
-    const raw = rawFromDisk ?? (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
+    const raw = rawFromBundle ?? rawFromDisk ?? (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
     if (!raw) {
       snapshotManifestCache = {
         version,
@@ -746,16 +750,19 @@ async function tryLoadCitySnapshotForVersion(city: string, origin: string, versi
     }
   }
 
+  const rawCsvFromBundle = getSnapshotCsv(version, manifestEntry.slug);
   let rawCsvFromDisk: string | null = null;
-  try {
-    const path = await import("node:path");
-    const dataCsvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
-    const publicCsvPath = path.join(process.cwd(), "public", "precompute", version, `${manifestEntry.slug}.csv`);
-    rawCsvFromDisk = (await tryReadFile(dataCsvPath)) ?? (await tryReadFile(publicCsvPath));
-  } catch {
-    // filesystem unavailable, fall through to HTTP
+  if (!rawCsvFromBundle) {
+    try {
+      const path = await import("node:path");
+      const dataCsvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
+      const publicCsvPath = path.join(process.cwd(), "public", "precompute", version, `${manifestEntry.slug}.csv`);
+      rawCsvFromDisk = (await tryReadFile(dataCsvPath)) ?? (await tryReadFile(publicCsvPath));
+    } catch {
+      // filesystem unavailable, fall through to HTTP
+    }
   }
-  const rawCsv = rawCsvFromDisk ?? (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
+  const rawCsv = rawCsvFromBundle ?? rawCsvFromDisk ?? (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
   if (!rawCsv) return null;
 
   const lines = rawCsv

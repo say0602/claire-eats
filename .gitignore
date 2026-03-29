@@ -18,6 +18,7 @@
 /out/
 /public/precompute/
 /data/precompute-backup-*/
+/lib/snapshot-data.generated.ts
 
 # production
 /build
