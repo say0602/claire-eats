@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RestaurantTable } from "@/components/RestaurantTable";
 import type { SortKey } from "@/components/RestaurantTable";
 import { SearchBar } from "@/components/SearchBar";
+import { CityCards } from "@/components/CityCards";
 import { getAppProfile } from "@/lib/app-profile";
 import {
   buildMapOpenClickedEvent,
@@ -186,8 +187,8 @@ export default function Home() {
     return `Demo mode: top cities are precomputed for speed when available${dateSuffix}; other cities use live search.`;
   }, [isPublicProfile, snapshotCities, snapshotFinishedAtUtc]);
 
-  async function handleSearch() {
-    const trimmedCity = city.trim();
+  async function executeSearch(targetCity: string) {
+    const trimmedCity = targetCity.trim();
     if (!trimmedCity) return;
     const searchId = latestSearchIdRef.current + 1;
     latestSearchIdRef.current = searchId;
@@ -256,6 +257,15 @@ export default function Home() {
     }
   }
 
+  function handleSearch() {
+    executeSearch(city);
+  }
+
+  function handleCityCardSelect(selectedCity: string) {
+    setCity(selectedCity);
+    executeSearch(selectedCity);
+  }
+
   const handleMapOpen = useCallback(
     ({ restaurantId, city: mapCity, rank }: { restaurantId: string; city: string; rank: number }) => {
       void emitAnalyticsEvent(
@@ -319,6 +329,10 @@ export default function Home() {
             ) : null}
           </div>
         </section>
+
+        {isPublicProfile && !searchedCity && !isLoading && (
+          <CityCards onCitySelect={handleCityCardSelect} />
+        )}
 
         {isGoogleOnly && restaurants.length > 0 && (
           <div className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800" aria-live="polite">

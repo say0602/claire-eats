@@ -26,6 +26,15 @@ Claire Eats supports two runtime profiles in the same codebase:
 
 The public profile is intended for the public website; the private profile is intended for local or access-controlled use.
 
+### Public demo mode (precomputed snapshot cities)
+
+Because Yelp/Google APIs are quota-limited and can be slow for first-time cities, the **public** site supports a demo-oriented fast path:
+
+- **Snapshot cities**: a curated set of “top cities” are **precomputed** and served instantly (no live Yelp/Google calls).
+- **Non-snapshot cities**: still supported; they use the normal live search pipeline.
+- **UI**: the public homepage shows a subtle one-line note:  
+  `Demo mode: {N} top cities are precomputed for speed (updated {date}); other cities use live search.`
+
 ---
 
 ## 2. Goals
@@ -62,11 +71,13 @@ The following are explicitly out of scope for the initial release.
 
 1. User enters a city name (e.g. "San Francisco")
 2. User clicks Search
-3. System fetches restaurants from Yelp Business Search API (top 50 by Yelp review count)
-4. System enriches Yelp rows via Google Places Text Search (best-effort)
-5. System fetches Google Places (New) prominent restaurants (up to 60) and appends unique additions after dedupe
-6. Results are rendered as a sortable table
-7. User sorts, inspects, and opens Google Maps links to decide
+3. **Public demo fast path (if eligible)**:
+   - If `APP_PROFILE=public` and the city is present in the snapshot manifest, the system serves the precomputed results immediately.
+4. Otherwise (normal mode), system fetches restaurants from Yelp Business Search API (top 50 by Yelp review count)
+5. System enriches Yelp rows via Google Places Text Search (best-effort)
+6. System fetches Google Places (New) prominent restaurants (up to 60) and appends unique additions after dedupe
+7. Results are rendered as a sortable table
+8. User sorts, inspects, and opens Google Maps links to decide
 
 Profile-specific UI behavior:
 
@@ -82,6 +93,19 @@ Profile-specific UI behavior:
 - Input: free-text city name
 - Trigger: Search button or Enter key
 - Validation: non-empty string
+
+---
+
+### 5.1.1 Snapshot manifest & suggestions (public demo)
+
+The client fetches a snapshot manifest to:
+
+- Populate the suggestion list for snapshot cities (where available)
+- Display the precompute “updated” date used in the demo-mode message
+
+API:
+
+- `GET /api/snapshots` returns `{ version, finished_at_utc, entries[] }`
 
 ---
 
@@ -119,6 +143,11 @@ Normal mode behavior:
 - Google Places (New) prominent results (up to 60) are fetched in parallel and deduped against Yelp rows.
 - Unique Google-prominent rows are appended (merged output capped at 80).
 - Yelp backfill is attempted for Google-prominent additions to recover Yelp rating/review_count where possible.
+
+Snapshot mode behavior (public demo):
+
+- When enabled and the city is in the snapshot manifest, results are served from precomputed CSVs (capped at 80 rows).
+- Snapshot rows may be marked as `google_only` for cities where Yelp coverage is insufficient.
 
 #### Michelin Guide (static dataset, archived for UI)
 
@@ -337,7 +366,15 @@ type Restaurant = {
 | Yelp | Business Search API | Primary restaurant list |
 | Google | Places Text Search + Places API (New) Text Search | Enrichment + prominent additions |
 | Michelin | Static JSON (build-time, ngshiheng dataset) | No API call; refreshed annually |
-| Deployment | Cloudflare | API keys via environment variables |
+| Deployment | Cloudflare (Workers via OpenNext) | API keys via environment variables |
+
+### Runtime constraints (Cloudflare Workers)
+
+Cloudflare Workers does not provide a Node.js filesystem, and self-fetching the same origin can be restricted. For the public demo snapshots, this means:
+
+- **Do not rely on `node:fs` at runtime**
+- **Do not rely on fetching `https://{site}/precompute/...` from within the worker**
+- **Do bundle snapshot assets at build time** so API routes can access them without filesystem/network access.
 
 ### Folder structure
 
@@ -347,6 +384,7 @@ claire-eats/
 │   ├── page.tsx                  # Main search + table UI
 │   ├── api/
 │   │   ├── search/route.ts       # Orchestrates Yelp + Google + Michelin
+│   │   ├── snapshots/route.ts    # Snapshot manifest for public demo mode
 │   │   ├── yelp/route.ts         # Yelp Business Search proxy
 │   │   └── google/route.ts       # Google Places proxy
 ├── components/
@@ -357,11 +395,15 @@ claire-eats/
 ├── lib/
 │   ├── michelin.ts               # Load + query static JSON
 │   ├── matching.ts               # Haversine + name matching logic
-│   └── scoring.ts                # Combined score computation
+│   ├── scoring.ts                # Combined score computation
+│   └── snapshot-data.generated.ts # GENERATED at build-time from data/precompute
 ├── data/
-│   └── michelin.json             # Pre-processed from ngshiheng dataset
+│   ├── michelin.json             # Pre-processed from ngshiheng dataset
+│   └── precompute/               # Committed snapshot inputs (CSV + _run-summary.json)
 └── scripts/
-    └── convert-michelin.ts       # CSV → city-indexed JSON
+    ├── convert-michelin.ts       # CSV → city-indexed JSON
+    ├── precompute-cities.mjs     # Generates snapshot CSVs + _run-summary.json (local tool)
+    └── sync-precompute-to-public.mjs # Build step: generate bundled snapshot module
 ```
 
 ---
