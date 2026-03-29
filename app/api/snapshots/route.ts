@@ -20,7 +20,7 @@ function getRequestOrigin(request: Request) {
         return normalizeBaseUrl(configuredUrl.origin);
       }
     } catch {
-      // Ignore malformed NEXT_PUBLIC_SITE_URL and fall through.
+      // fall through
     }
   }
 
@@ -30,7 +30,7 @@ function getRequestOrigin(request: Request) {
       return url.origin;
     }
   } catch {
-    // Ignore malformed request URL and fall through to header-derived origin.
+    // fall through
   }
 
   const forwardedHost = request.headers.get("x-forwarded-host") || request.headers.get("host");
@@ -51,48 +51,57 @@ async function tryReadFile(filePath: string) {
   }
 }
 
-async function tryFetchText(url: string) {
-  try {
-    const response = await fetch(url, { cache: "no-store" });
-    if (!response.ok) return null;
-    return await response.text();
-  } catch {
-    return null;
-  }
-}
-
 type SnapshotSummary = {
   finishedAtUtc: string | null;
   entries: Array<{ city: string; slug: string }>;
 };
 
+function parseManifest(raw: string): SnapshotSummary | null {
+  const parsed = JSON.parse(raw) as {
+    finished_at_utc?: string;
+    results?: Array<{ city?: string; slug?: string; success?: boolean }>;
+  };
+
+  const results = Array.isArray(parsed.results) ? parsed.results : [];
+  const entries = results
+    .filter((entry) => entry.success && typeof entry.city === "string" && typeof entry.slug === "string")
+    .map((entry) => ({ city: entry.city as string, slug: entry.slug as string }));
+  if (entries.length === 0) return null;
+
+  return { finishedAtUtc: parsed.finished_at_utc ?? null, entries };
+}
+
 async function loadSnapshotSummary(request: Request, version: string): Promise<SnapshotSummary | null> {
   try {
     const path = await import("node:path");
-    const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
-    const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
-    const rawFromDisk = (await tryReadFile(dataSummaryPath)) ?? (await tryReadFile(publicSummaryPath));
-    const origin = getRequestOrigin(request);
-    const raw =
-      rawFromDisk ??
-      (await tryFetchText(`${normalizeBaseUrl(origin)}/precompute/${encodeURIComponent(version)}/_run-summary.json`));
-    if (!raw) return null;
-
-    const parsed = JSON.parse(raw) as {
-      finished_at_utc?: string;
-      results?: Array<{ city?: string; slug?: string; success?: boolean }>;
-    };
-
-    const results = Array.isArray(parsed.results) ? parsed.results : [];
-    const entries = results
-      .filter((entry) => entry.success && typeof entry.city === "string" && typeof entry.slug === "string")
-      .map((entry) => ({ city: entry.city as string, slug: entry.slug as string }));
-    if (entries.length === 0) return null;
-
-    return { finishedAtUtc: parsed.finished_at_utc ?? null, entries };
+    const candidates = [
+      path.join(process.cwd(), "data", "precompute", version, "_run-summary.json"),
+      path.join(process.cwd(), "public", "precompute", version, "_run-summary.json"),
+    ];
+    for (const candidate of candidates) {
+      const raw = await tryReadFile(candidate);
+      if (raw) {
+        const result = parseManifest(raw);
+        if (result) return result;
+      }
+    }
   } catch {
-    return null;
+    // filesystem unavailable, fall through to HTTP
   }
+
+  try {
+    const origin = getRequestOrigin(request);
+    const url = `${normalizeBaseUrl(origin)}/precompute/${encodeURIComponent(version)}/_run-summary.json`;
+    const response = await fetch(url, { cache: "no-store" });
+    if (response.ok) {
+      const raw = await response.text();
+      return parseManifest(raw);
+    }
+  } catch {
+    // HTTP fallback failed
+  }
+
+  return null;
 }
 
 export async function GET(request: Request) {
@@ -113,4 +122,3 @@ export async function GET(request: Request) {
     entries: summary.entries,
   });
 }
-

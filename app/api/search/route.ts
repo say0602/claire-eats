@@ -643,13 +643,16 @@ async function loadSnapshotManifest(version: string, origin: string) {
   }
 
   try {
-    const path = await import("node:path");
-    const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
-    const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
-    const raw =
-      (await tryReadFile(dataSummaryPath)) ??
-      (await tryReadFile(publicSummaryPath)) ??
-      (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
+    let rawFromDisk: string | null = null;
+    try {
+      const path = await import("node:path");
+      const dataSummaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
+      const publicSummaryPath = path.join(process.cwd(), "public", "precompute", version, "_run-summary.json");
+      rawFromDisk = (await tryReadFile(dataSummaryPath)) ?? (await tryReadFile(publicSummaryPath));
+    } catch {
+      // filesystem unavailable (e.g. edge runtime), fall through to HTTP
+    }
+    const raw = rawFromDisk ?? (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
     if (!raw) {
       snapshotManifestCache = {
         version,
@@ -743,13 +746,16 @@ async function tryLoadCitySnapshotForVersion(city: string, origin: string, versi
     }
   }
 
-  const path = await import("node:path");
-  const dataCsvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
-  const publicCsvPath = path.join(process.cwd(), "public", "precompute", version, `${manifestEntry.slug}.csv`);
-  const rawCsv =
-    (await tryReadFile(dataCsvPath)) ??
-    (await tryReadFile(publicCsvPath)) ??
-    (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
+  let rawCsvFromDisk: string | null = null;
+  try {
+    const path = await import("node:path");
+    const dataCsvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
+    const publicCsvPath = path.join(process.cwd(), "public", "precompute", version, `${manifestEntry.slug}.csv`);
+    rawCsvFromDisk = (await tryReadFile(dataCsvPath)) ?? (await tryReadFile(publicCsvPath));
+  } catch {
+    // filesystem unavailable, fall through to HTTP
+  }
+  const rawCsv = rawCsvFromDisk ?? (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
   if (!rawCsv) return null;
 
   const lines = rawCsv
