@@ -14,6 +14,8 @@ import {
 } from "@/lib/analytics";
 import type { Restaurant, SearchWarning } from "@/lib/types";
 
+const SNAPSHOT_VERSION_DEFAULT = "pilot-v1";
+
 function isSearchWarning(value: unknown): value is SearchWarning {
   if (!value || typeof value !== "object") return false;
   const warning = value as Record<string, unknown>;
@@ -110,18 +112,51 @@ export default function Home() {
 
     let cancelled = false;
     (async () => {
+      const applySnapshotMeta = (record: Record<string, unknown>) => {
+        const cities = record.cities;
+        if (!Array.isArray(cities)) return false;
+        const finishedAtRaw = typeof record.finished_at_utc === "string" ? record.finished_at_utc : null;
+        const list = cities
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        if (cancelled) return true;
+        setSnapshotCities(Array.from(new Map(list.map((c) => [c.toLowerCase(), c])).values()));
+        setSnapshotFinishedAtUtc(finishedAtRaw);
+        return true;
+      };
+
       try {
         const response = await fetch("/api/snapshots", { cache: "no-store" });
         const payload: unknown = await response.json();
+        if (response.ok && payload && typeof payload === "object") {
+          const applied = applySnapshotMeta(payload as Record<string, unknown>);
+          if (applied) return;
+        }
+      } catch {
+        // Fall back to static summary fetch.
+      }
+
+      try {
+        const response = await fetch(`/precompute/${SNAPSHOT_VERSION_DEFAULT}/_run-summary.json`, {
+          cache: "no-store",
+        });
+        const payload: unknown = await response.json();
         if (!response.ok || !payload || typeof payload !== "object") return;
-        const record = payload as Record<string, unknown>;
-        const cities = record.cities;
-        if (!Array.isArray(cities)) return;
-        const finishedAtRaw = typeof record.finished_at_utc === "string" ? record.finished_at_utc : null;
-        const list = cities.filter((value): value is string => typeof value === "string").map((value) => value.trim()).filter(Boolean);
-        if (cancelled) return;
-        setSnapshotCities(Array.from(new Map(list.map((c) => [c.toLowerCase(), c])).values()));
-        setSnapshotFinishedAtUtc(finishedAtRaw);
+        const parsed = payload as {
+          finished_at_utc?: unknown;
+          results?: Array<{ city?: unknown; success?: unknown }>;
+        };
+        const results = Array.isArray(parsed.results) ? parsed.results : [];
+        const cities = results
+          .filter((entry) => entry && entry.success === true && typeof entry.city === "string")
+          .map((entry) => (entry.city as string).trim())
+          .filter(Boolean);
+        const fallbackRecord: Record<string, unknown> = {
+          finished_at_utc: typeof parsed.finished_at_utc === "string" ? parsed.finished_at_utc : null,
+          cities,
+        };
+        applySnapshotMeta(fallbackRecord);
       } catch {
         // Ignore and fall back to default suggestions.
       }
@@ -146,9 +181,9 @@ export default function Home() {
       }
     }
     if (snapshotCities && snapshotCities.length > 0) {
-      return `Demo mode: ${snapshotCities.length} top cities are precomputed for speed; other cities use live search${dateSuffix}.`;
+      return `Demo mode: ${snapshotCities.length} top cities are precomputed for speed${dateSuffix}; other cities use live search.`;
     }
-    return `Demo mode: top cities are precomputed for speed when available; other cities use live search${dateSuffix}.`;
+    return `Demo mode: top cities are precomputed for speed when available${dateSuffix}; other cities use live search.`;
   }, [isPublicProfile, snapshotCities, snapshotFinishedAtUtc]);
 
   async function handleSearch() {
