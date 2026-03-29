@@ -1,6 +1,6 @@
  "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RestaurantTable } from "@/components/RestaurantTable";
 import type { SortKey } from "@/components/RestaurantTable";
 import { SearchBar } from "@/components/SearchBar";
@@ -65,6 +65,7 @@ function hasErrorPayload(value: unknown): value is { error: { message?: string }
 
 export default function Home() {
   const appProfile = getAppProfile();
+  const isPublicProfile = appProfile === "public";
   const [city, setCity] = useState("");
   const [restaurants, setRestaurants] = useState<Restaurant[]>([]);
   const [warnings, setWarnings] = useState<SearchWarning[]>([]);
@@ -73,6 +74,8 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchedCity, setSearchedCity] = useState<string | null>(null);
   const [isGoogleOnly, setIsGoogleOnly] = useState(false);
+  const [snapshotCities, setSnapshotCities] = useState<string[] | null>(null);
+  const [snapshotFinishedAtUtc, setSnapshotFinishedAtUtc] = useState<string | null>(null);
   const sessionIdRef = useRef<string>(createSessionId());
   const activeResultsRef = useRef<{ city: string; openedAtMs: number } | null>(null);
   const latestSearchIdRef = useRef(0);
@@ -97,6 +100,56 @@ export default function Home() {
       closeResultsView();
     };
   }, [closeResultsView]);
+
+  useEffect(() => {
+    if (!isPublicProfile) {
+      setSnapshotCities(null);
+      setSnapshotFinishedAtUtc(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/snapshots", { cache: "no-store" });
+        const payload: unknown = await response.json();
+        if (!response.ok || !payload || typeof payload !== "object") return;
+        const record = payload as Record<string, unknown>;
+        const cities = record.cities;
+        if (!Array.isArray(cities)) return;
+        const finishedAtRaw = typeof record.finished_at_utc === "string" ? record.finished_at_utc : null;
+        const list = cities.filter((value): value is string => typeof value === "string").map((value) => value.trim()).filter(Boolean);
+        if (cancelled) return;
+        setSnapshotCities(Array.from(new Map(list.map((c) => [c.toLowerCase(), c])).values()));
+        setSnapshotFinishedAtUtc(finishedAtRaw);
+      } catch {
+        // Ignore and fall back to default suggestions.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isPublicProfile]);
+
+  const demoNote = useMemo(() => {
+    if (!isPublicProfile) return null;
+    let dateSuffix = "";
+    if (snapshotFinishedAtUtc) {
+      const timestampMs = Date.parse(snapshotFinishedAtUtc);
+      if (Number.isFinite(timestampMs)) {
+        dateSuffix = ` (updated ${new Date(timestampMs).toLocaleDateString("en-US", {
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+        })})`;
+      }
+    }
+    if (snapshotCities && snapshotCities.length > 0) {
+      return `Demo mode: ${snapshotCities.length} top cities are precomputed for speed; other cities use live search${dateSuffix}.`;
+    }
+    return `Demo mode: top cities are precomputed for speed when available; other cities use live search${dateSuffix}.`;
+  }, [isPublicProfile, snapshotCities, snapshotFinishedAtUtc]);
 
   async function handleSearch() {
     const trimmedCity = city.trim();
@@ -190,9 +243,11 @@ export default function Home() {
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
       <main className="flex flex-col gap-4">
-        <section className="relative overflow-hidden rounded-2xl border-[0.5px] border-[#E8DAD0] bg-[#FBF5F0] p-10">
-          <div className="pointer-events-none absolute -right-10 -top-14 h-44 w-44 rounded-full bg-[#C4342D] opacity-[0.04]" />
-          <div className="pointer-events-none absolute right-10 top-10 h-20 w-20 rounded-full bg-[#C4342D] opacity-[0.06]" />
+        <section className="relative rounded-2xl border-[0.5px] border-[#E8DAD0] bg-[#FBF5F0] p-10">
+          <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
+            <div className="absolute -right-10 -top-14 h-44 w-44 rounded-full bg-[#C4342D] opacity-[0.04]" />
+            <div className="absolute right-10 top-10 h-20 w-20 rounded-full bg-[#C4342D] opacity-[0.06]" />
+          </div>
 
           <header className="relative z-10 mb-6">
             <div className="mb-4 inline-flex items-center gap-2.5">
@@ -222,7 +277,11 @@ export default function Home() {
               onValueChange={setCity}
               onSubmit={handleSearch}
               isLoading={isLoading}
+              suggestions={isPublicProfile && snapshotCities ? snapshotCities : undefined}
             />
+            {demoNote ? (
+              <p className="mt-2 text-xs text-[#8A7060]">{demoNote}</p>
+            ) : null}
           </div>
         </section>
 

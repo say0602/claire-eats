@@ -6,9 +6,10 @@ type SearchBarProps = {
   onSubmit: () => void;
   disabled?: boolean;
   isLoading?: boolean;
+  suggestions?: string[];
 };
 
-const CITY_SUGGESTIONS = [
+const DEFAULT_CITY_SUGGESTIONS = [
   "San Francisco, CA",
   "San Diego, CA",
   "San Jose, CA",
@@ -29,15 +30,26 @@ export function SearchBar({
   onSubmit,
   disabled = false,
   isLoading = false,
+  suggestions = DEFAULT_CITY_SUGGESTIONS,
 }: SearchBarProps) {
   const isSubmitDisabled = disabled || isLoading || value.trim().length === 0;
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
 
   const filteredSuggestions = useMemo(() => {
     const query = value.trim().toLowerCase();
-    const base = query.length === 0 ? CITY_SUGGESTIONS : CITY_SUGGESTIONS.filter((city) => city.toLowerCase().includes(query));
+    const normalizedSuggestions = Array.from(
+      new Map(
+        (suggestions ?? [])
+          .map((city) => city.trim())
+          .filter((city) => city.length > 0)
+          .map((city) => [city.toLowerCase(), city]),
+      ).values(),
+    );
+    const base = query.length === 0
+      ? normalizedSuggestions
+      : normalizedSuggestions.filter((city) => city.toLowerCase().includes(query));
     return base.slice(0, 8);
-  }, [value]);
+  }, [value, suggestions]);
 
   const shouldShowSuggestions =
     !disabled && !isLoading && isDropdownOpen && filteredSuggestions.length > 0;

@@ -17,6 +17,7 @@
 /.next/
 /out/
 /public/precompute/
+/data/precompute-backup-*/
 
 # production
 /build
