@@ -87,7 +87,7 @@ export function SearchBar({
             }}
             autoComplete="off"
             disabled={disabled || isLoading}
-            className="h-12 w-full rounded-l-xl rounded-r-none border border-[#E8DAD0] bg-white px-5 text-[18px] text-[#2C1810] placeholder:text-[#8A7060] focus:outline-none focus:ring-2 focus:ring-[#C4342D]/20"
+            className="h-11 w-full rounded-l-xl rounded-r-none border border-[#E8DAD0] bg-white px-4 text-base text-[#2C1810] placeholder:text-[#8A7060] focus:outline-none focus:ring-2 focus:ring-[#C4342D]/20 sm:h-12 sm:px-5 sm:text-[18px]"
             placeholder="Enter a city (e.g., San Francisco, CA)"
             aria-controls="city-suggestions"
             aria-autocomplete="list"
@@ -118,7 +118,7 @@ export function SearchBar({
         </div>
         <button
           type="submit"
-          className="h-12 rounded-r-xl rounded-l-none bg-[#C4342D] px-8 text-base font-semibold text-white transition-colors hover:bg-[#AD2E29] disabled:cursor-not-allowed disabled:bg-[#C4342D]/70"
+          className="h-11 rounded-r-xl rounded-l-none bg-[#C4342D] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#AD2E29] disabled:cursor-not-allowed disabled:bg-[#C4342D]/70 sm:h-12 sm:px-8 sm:text-base"
           disabled={isSubmitDisabled}
         >
           <span className="inline-flex items-center gap-2">

@@ -194,8 +194,18 @@ export function RestaurantTable({
   }, [sortedRestaurants, isGoogleOnly, isPublicProfile]);
 
   const showYelpPlaceholder = (restaurant: Restaurant) => isGoogleOnly || restaurant.yelp.review_count === 0;
+
+  const mobileSortOptions: { key: SortKey; label: string; disabled?: boolean }[] = isPublicProfile
+    ? [{ key: "total_reviews", label: "Popularity" }]
+    : [
+        { key: "combined_score", label: "Score" },
+        { key: "total_reviews", label: "Reviews" },
+        { key: "yelp_rating", label: "Yelp", disabled: isGoogleOnly },
+        { key: "google_rating", label: "Google" },
+      ];
+
   return (
-    <div className="w-full rounded border border-zinc-200 bg-white p-4">
+    <div className="w-full rounded border border-zinc-200 bg-white p-3 sm:p-4">
       {!isPublicProfile && (
         <div className="mb-3 flex justify-end">
           <a
@@ -207,7 +217,117 @@ export function RestaurantTable({
           </a>
         </div>
       )}
-      <div>
+
+      {/* ── Mobile card view ── */}
+      <div className="md:hidden">
+        <div className="mb-3 flex items-center gap-1.5 overflow-x-auto">
+          <span className="shrink-0 text-xs text-zinc-500">Sort:</span>
+          {mobileSortOptions.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              disabled={opt.disabled}
+              onClick={() => onSortKeyChange(opt.key)}
+              className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                opt.disabled
+                  ? "cursor-default text-zinc-300"
+                  : effectiveSortKey === opt.key
+                    ? "bg-zinc-900 text-white"
+                    : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-2.5">
+          {sortedRestaurants.map((restaurant, index) => {
+            const yelpHidden = showYelpPlaceholder(restaurant);
+            const cuisine = formatCuisine(restaurant.yelp.categories);
+            const price = yelpHidden ? null : (restaurant.yelp.price ?? null);
+            const meta = [price, cuisine !== "-" ? cuisine : null].filter(Boolean).join(" · ");
+
+            return (
+              <div
+                key={restaurant.id}
+                className="rounded-lg border border-zinc-100 bg-zinc-50/50 px-3.5 py-3"
+              >
+                {/* Row 1: rank + name + map */}
+                <div className="flex items-start gap-2">
+                  <span className="mt-0.5 shrink-0 text-xs font-medium text-zinc-400">
+                    {index + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 text-sm font-semibold leading-snug text-zinc-900">
+                    {restaurant.name}
+                  </span>
+                  {restaurant.google.maps_url ? (
+                    <a
+                      href={restaurant.google.maps_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="ml-1 shrink-0 rounded border border-zinc-300 px-2 py-0.5 text-[11px] font-medium text-zinc-600 hover:bg-zinc-100"
+                      onClick={() =>
+                        onMapOpen?.({
+                          restaurantId: restaurant.id,
+                          city: restaurant.city,
+                          rank: index + 1,
+                        })
+                      }
+                    >
+                      Map
+                    </a>
+                  ) : null}
+                </div>
+
+                {/* Row 2: ratings */}
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="font-medium text-zinc-500">Yelp</span>
+                    {yelpHidden ? (
+                      <span className="text-zinc-300">-</span>
+                    ) : (
+                      <span className="truncate text-zinc-700">
+                        {formatRating(restaurant.yelp.rating)}{" "}
+                        <span className="text-zinc-400">/</span>{" "}
+                        {formatReviewCount(restaurant.yelp.review_count)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="font-medium text-zinc-500">Google</span>
+                    <span className="truncate text-zinc-700">
+                      {formatRating(restaurant.google.rating)}{" "}
+                      <span className="text-zinc-400">/</span>{" "}
+                      {formatReviewCount(restaurant.google.review_count)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Row 3 (private): score + total reviews */}
+                {!isPublicProfile && (
+                  <div className="mt-1.5 flex items-center gap-3 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-medium text-zinc-500">Score</span>
+                      <ScorePill score={restaurant.combined_score} />
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-medium text-zinc-500">Total</span>
+                      <span className="text-zinc-700">{formatReviewCount(totalReviews(restaurant))}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Row 4: price + cuisine */}
+                {meta && <p className="mt-1.5 break-words text-xs text-zinc-500">{meta}</p>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Desktop table view ── */}
+      <div className="hidden md:block">
         <table className="w-full table-fixed border-collapse text-xs sm:text-sm">
           <thead>
             <tr className="border-b border-zinc-200 text-left text-zinc-600">

@@ -266,6 +266,17 @@ export default function Home() {
     executeSearch(selectedCity);
   }
 
+  function handleTitleReset() {
+    closeResultsView();
+    setCity("");
+    setRestaurants([]);
+    setWarnings([]);
+    setSearchedCity(null);
+    setErrorMessage(null);
+    setIsGoogleOnly(false);
+    setIsLoading(false);
+  }
+
   const handleMapOpen = useCallback(
     ({ restaurantId, city: mapCity, rank }: { restaurantId: string; city: string; rank: number }) => {
       void emitAnalyticsEvent(
@@ -286,9 +297,9 @@ export default function Home() {
     : "claire-eats-results.csv";
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 bg-zinc-50 px-6 py-8 font-sans">
+    <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 bg-zinc-50 px-4 py-4 font-sans sm:gap-6 sm:px-6 sm:py-8">
       <main className="flex flex-col gap-4">
-        <section className="relative rounded-2xl border-[0.5px] border-[#E8DAD0] bg-[#FBF5F0] p-10">
+        <section className="relative rounded-2xl border-[0.5px] border-[#E8DAD0] bg-[#FBF5F0] p-5 sm:p-10">
           <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
             <div className="absolute -right-10 -top-14 h-44 w-44 rounded-full bg-[#C4342D] opacity-[0.04]" />
             <div className="absolute right-10 top-10 h-20 w-20 rounded-full bg-[#C4342D] opacity-[0.06]" />
@@ -312,7 +323,16 @@ export default function Home() {
               </span>
               <span className="text-[14px] font-semibold tracking-[0.08em] text-[#C4342D]">RESTAURANT RANKINGS</span>
             </div>
-            <h1 className="text-[34px] font-medium leading-none text-[#2C1810]">Claire Eats</h1>
+            <h1>
+              <button
+                type="button"
+                onClick={handleTitleReset}
+                aria-label="Reset to home screen"
+                className="rounded-sm text-[26px] font-medium leading-none text-[#2C1810] transition-colors hover:text-[#C4342D] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C4342D]/30 sm:text-[34px]"
+              >
+                Claire Eats
+              </button>
+            </h1>
             <p className="mt-3 text-[14px] text-[#8A7060]">Research restaurants by city — Yelp and Google in one view.</p>
           </header>
 

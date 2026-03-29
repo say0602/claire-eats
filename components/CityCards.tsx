@@ -4,43 +4,83 @@ type CityCardEntry = {
   icon: React.ReactNode;
 };
 
-function GoldenGate() {
+function GoldenGateBridge() {
   return (
     <svg viewBox="0 0 64 64" fill="none" className="h-12 w-12">
-      <rect x="10" y="20" width="4" height="30" rx="1" fill="#C4342D" opacity="0.25" />
-      <rect x="50" y="20" width="4" height="30" rx="1" fill="#C4342D" opacity="0.25" />
-      <rect x="10" y="18" width="4" height="6" rx="1" fill="#C4342D" opacity="0.4" />
-      <rect x="50" y="18" width="4" height="6" rx="1" fill="#C4342D" opacity="0.4" />
-      <path d="M12 22C12 22 22 16 32 16C42 16 52 22 52 22" stroke="#C4342D" strokeWidth="2.5" opacity="0.35" />
-      <path d="M12 27C12 27 22 21 32 21C42 21 52 27 52 27" stroke="#C4342D" strokeWidth="1.5" opacity="0.2" />
-      <line x1="8" y1="50" x2="56" y2="50" stroke="#C4342D" strokeWidth="2" opacity="0.15" />
+      {/* left tower */}
+      <rect x="15" y="10" width="3" height="36" fill="#C4342D" opacity="0.35" />
+      <rect x="20" y="10" width="3" height="36" fill="#C4342D" opacity="0.35" />
+      <rect x="15" y="8" width="8" height="3" rx="0.5" fill="#C4342D" opacity="0.4" />
+      <rect x="15" y="18" width="8" height="2" fill="#C4342D" opacity="0.2" />
+      <rect x="15" y="26" width="8" height="2" fill="#C4342D" opacity="0.2" />
+      {/* right tower */}
+      <rect x="41" y="10" width="3" height="36" fill="#C4342D" opacity="0.35" />
+      <rect x="46" y="10" width="3" height="36" fill="#C4342D" opacity="0.35" />
+      <rect x="41" y="8" width="8" height="3" rx="0.5" fill="#C4342D" opacity="0.4" />
+      <rect x="41" y="18" width="8" height="2" fill="#C4342D" opacity="0.2" />
+      <rect x="41" y="26" width="8" height="2" fill="#C4342D" opacity="0.2" />
+      {/* main catenary cables */}
+      <path d="M2 14C2 14 8 12 19 10" stroke="#C4342D" strokeWidth="2" opacity="0.35" strokeLinecap="round" />
+      <path d="M19 10C24 18 28 32 32 34C36 32 40 18 45 10" stroke="#C4342D" strokeWidth="2" opacity="0.35" />
+      <path d="M45 10C56 12 62 14 62 14" stroke="#C4342D" strokeWidth="2" opacity="0.35" strokeLinecap="round" />
+      {/* road deck */}
+      <rect x="4" y="34" width="56" height="2.5" rx="0.5" fill="#C4342D" opacity="0.25" />
+      {/* vertical suspender cables */}
+      <line x1="24" y1="16" x2="24" y2="34" stroke="#C4342D" strokeWidth="0.8" opacity="0.18" />
+      <line x1="28" y1="24" x2="28" y2="34" stroke="#C4342D" strokeWidth="0.8" opacity="0.18" />
+      <line x1="32" y1="34" x2="32" y2="34" stroke="#C4342D" strokeWidth="0.8" opacity="0.18" />
+      <line x1="36" y1="24" x2="36" y2="34" stroke="#C4342D" strokeWidth="0.8" opacity="0.18" />
+      <line x1="40" y1="16" x2="40" y2="34" stroke="#C4342D" strokeWidth="0.8" opacity="0.18" />
+      {/* water waves */}
+      <path d="M4 48C8 46 12 48 16 46C20 44 24 46 28 44C32 42 36 44 40 42C44 40 48 42 52 40C56 38 60 40 62 39" stroke="#C4342D" strokeWidth="2" opacity="0.15" strokeLinecap="round" />
+      <path d="M4 53C8 51 12 53 16 51C20 49 24 51 28 49C32 47 36 49 40 47C44 45 48 47 52 45C56 43 60 45 62 44" stroke="#C4342D" strokeWidth="1.5" opacity="0.1" strokeLinecap="round" />
     </svg>
   );
 }
 
-function StatueOfLiberty() {
+function EmpireState() {
   return (
     <svg viewBox="0 0 64 64" fill="none" className="h-12 w-12">
-      <rect x="28" y="28" width="8" height="22" rx="2" fill="#C4342D" opacity="0.2" />
-      <rect x="26" y="48" width="12" height="4" rx="1" fill="#C4342D" opacity="0.15" />
-      <path d="M32 28V18" stroke="#C4342D" strokeWidth="2.5" opacity="0.35" strokeLinecap="round" />
-      <circle cx="32" cy="24" r="5" fill="#C4342D" opacity="0.18" />
-      <path d="M27 18L32 10L37 18" fill="#C4342D" opacity="0.25" />
-      <path d="M29 14L25 8M32 12L32 5M35 14L39 8" stroke="#C4342D" strokeWidth="1.5" opacity="0.3" strokeLinecap="round" />
+      {/* antenna spire */}
+      <line x1="32" y1="4" x2="32" y2="14" stroke="#C4342D" strokeWidth="1.5" opacity="0.4" strokeLinecap="round" />
+      {/* crown/top */}
+      <path d="M29 14H35L34 18H30L29 14Z" fill="#C4342D" opacity="0.35" />
+      {/* upper tower */}
+      <rect x="28" y="18" width="8" height="12" rx="1" fill="#C4342D" opacity="0.3" />
+      {/* setback */}
+      <rect x="25" y="30" width="14" height="4" rx="1" fill="#C4342D" opacity="0.25" />
+      {/* main body */}
+      <rect x="22" y="34" width="20" height="16" rx="1" fill="#C4342D" opacity="0.22" />
+      {/* base */}
+      <rect x="20" y="50" width="24" height="4" rx="1" fill="#C4342D" opacity="0.15" />
+      {/* windows */}
+      <line x1="27" y1="36" x2="27" y2="50" stroke="#C4342D" strokeWidth="0.8" opacity="0.12" />
+      <line x1="32" y1="36" x2="32" y2="50" stroke="#C4342D" strokeWidth="0.8" opacity="0.12" />
+      <line x1="37" y1="36" x2="37" y2="50" stroke="#C4342D" strokeWidth="0.8" opacity="0.12" />
+      <line x1="22" y1="40" x2="42" y2="40" stroke="#C4342D" strokeWidth="0.6" opacity="0.1" />
+      <line x1="22" y1="45" x2="42" y2="45" stroke="#C4342D" strokeWidth="0.6" opacity="0.1" />
     </svg>
   );
 }
 
-function PalmTree() {
+function FilmReel() {
   return (
     <svg viewBox="0 0 64 64" fill="none" className="h-12 w-12">
-      <path d="M32 52V24" stroke="#C4342D" strokeWidth="2.5" opacity="0.25" strokeLinecap="round" />
-      <path d="M32 24C26 18 18 18 14 20" stroke="#C4342D" strokeWidth="2" opacity="0.3" strokeLinecap="round" />
-      <path d="M32 24C38 18 46 18 50 20" stroke="#C4342D" strokeWidth="2" opacity="0.3" strokeLinecap="round" />
-      <path d="M32 22C28 14 20 12 16 14" stroke="#C4342D" strokeWidth="2" opacity="0.25" strokeLinecap="round" />
-      <path d="M32 22C36 14 44 12 48 14" stroke="#C4342D" strokeWidth="2" opacity="0.25" strokeLinecap="round" />
-      <path d="M32 20C30 12 32 8 32 8" stroke="#C4342D" strokeWidth="2" opacity="0.3" strokeLinecap="round" />
-      <ellipse cx="32" cy="52" rx="10" ry="2" fill="#C4342D" opacity="0.1" />
+      {/* clapperboard top */}
+      <path d="M12 18L52 18L48 10H16L12 18Z" fill="#C4342D" opacity="0.3" />
+      {/* clapper stripes */}
+      <line x1="20" y1="10.5" x2="16" y2="17.5" stroke="#C4342D" strokeWidth="2" opacity="0.2" />
+      <line x1="28" y1="10.5" x2="24" y2="17.5" stroke="#C4342D" strokeWidth="2" opacity="0.2" />
+      <line x1="36" y1="10.5" x2="32" y2="17.5" stroke="#C4342D" strokeWidth="2" opacity="0.2" />
+      <line x1="44" y1="10.5" x2="40" y2="17.5" stroke="#C4342D" strokeWidth="2" opacity="0.2" />
+      {/* board body */}
+      <rect x="12" y="18" width="40" height="28" rx="2" fill="#C4342D" opacity="0.18" />
+      {/* text lines */}
+      <line x1="18" y1="26" x2="36" y2="26" stroke="#C4342D" strokeWidth="2" opacity="0.15" strokeLinecap="round" />
+      <line x1="18" y1="32" x2="30" y2="32" stroke="#C4342D" strokeWidth="2" opacity="0.12" strokeLinecap="round" />
+      <line x1="18" y1="38" x2="34" y2="38" stroke="#C4342D" strokeWidth="2" opacity="0.12" strokeLinecap="round" />
+      {/* star */}
+      <path d="M44 32L45.5 35H49L46 37.5L47 41L44 39L41 41L42 37.5L39 35H42.5L44 32Z" fill="#C4342D" opacity="0.25" />
     </svg>
   );
 }
@@ -58,14 +98,22 @@ function Skyline() {
   );
 }
 
-function BeachUmbrella() {
+function Beach() {
   return (
     <svg viewBox="0 0 64 64" fill="none" className="h-12 w-12">
-      <path d="M32 22V50" stroke="#C4342D" strokeWidth="2" opacity="0.25" strokeLinecap="round" />
-      <path d="M18 26C18 18 24 12 32 12C40 12 46 18 46 26" fill="#C4342D" opacity="0.2" />
-      <path d="M32 12C28 16 26 22 26 26" stroke="#C4342D" strokeWidth="1.5" opacity="0.3" />
-      <path d="M32 12C36 16 38 22 38 26" stroke="#C4342D" strokeWidth="1.5" opacity="0.3" />
-      <path d="M22 50C22 50 26 46 32 50C38 46 42 50 42 50" stroke="#C4342D" strokeWidth="1.5" opacity="0.15" strokeLinecap="round" />
+      {/* sun */}
+      <circle cx="48" cy="14" r="7" fill="#C4342D" opacity="0.15" />
+      <circle cx="48" cy="14" r="4" fill="#C4342D" opacity="0.12" />
+      {/* palm trunk */}
+      <path d="M18 50C20 38 22 30 24 24" stroke="#C4342D" strokeWidth="2.5" opacity="0.25" strokeLinecap="round" />
+      {/* palm fronds */}
+      <path d="M24 24C18 18 10 18 8 20" stroke="#C4342D" strokeWidth="2" opacity="0.28" strokeLinecap="round" />
+      <path d="M24 24C30 18 38 20 40 22" stroke="#C4342D" strokeWidth="2" opacity="0.28" strokeLinecap="round" />
+      <path d="M24 22C20 14 12 14 10 16" stroke="#C4342D" strokeWidth="1.5" opacity="0.22" strokeLinecap="round" />
+      <path d="M24 22C28 16 36 16 38 18" stroke="#C4342D" strokeWidth="1.5" opacity="0.22" strokeLinecap="round" />
+      {/* waves */}
+      <path d="M4 44C10 42 16 44 22 42C28 40 34 42 40 40C46 38 52 40 60 38" stroke="#C4342D" strokeWidth="2" opacity="0.15" strokeLinecap="round" />
+      <path d="M4 50C10 48 16 50 22 48C28 46 34 48 40 46C46 44 52 46 60 44" stroke="#C4342D" strokeWidth="1.5" opacity="0.1" strokeLinecap="round" />
     </svg>
   );
 }
@@ -165,11 +213,11 @@ function Pyramid() {
 }
 
 const FEATURED_CITIES: CityCardEntry[] = [
-  { label: "San Francisco", searchValue: "San Francisco, CA", icon: <GoldenGate /> },
-  { label: "New York", searchValue: "New York, NY", icon: <StatueOfLiberty /> },
-  { label: "Los Angeles", searchValue: "Los Angeles, CA", icon: <PalmTree /> },
+  { label: "San Francisco", searchValue: "San Francisco, CA", icon: <GoldenGateBridge /> },
+  { label: "New York", searchValue: "New York, NY", icon: <EmpireState /> },
+  { label: "Los Angeles", searchValue: "Los Angeles, CA", icon: <FilmReel /> },
   { label: "Chicago", searchValue: "Chicago, IL", icon: <Skyline /> },
-  { label: "Miami", searchValue: "Miami, FL", icon: <BeachUmbrella /> },
+  { label: "Miami", searchValue: "Miami, FL", icon: <Beach /> },
   { label: "Austin", searchValue: "Austin, TX", icon: <GuitarStar /> },
   { label: "Tokyo", searchValue: "Tokyo, Japan", icon: <ToriiGate /> },
   { label: "London", searchValue: "London, UK", icon: <BigBen /> },
