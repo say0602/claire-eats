@@ -616,6 +616,901 @@ describe("search orchestrator", () => {
     expect(backfillLookupAttempts).toBe(2);
   });
 
+  it("stops prominent Yelp backfill when budget is exhausted and reports degraded budget mode", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.YELP_PROMINENT_BACKFILL_BUDGET_MS = "0";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DIAGNOSTICS_ENABLED = "1";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    let backfillLookupAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Existing Yelp Row",
+              city: "San Francisco",
+              yelp: {
+                rating: 4.5,
+                review_count: 1200,
+                price: "$$",
+                categories: ["Seafood"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.6,
+            review_count: 800,
+            place_id: "existing-google-place",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:existing-google-place",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({
+          places: [
+            {
+              id: "prominent-budget-test",
+              displayName: { text: "Budget Test Restaurant" },
+              rating: 4.7,
+              userRatingCount: 900,
+              location: { latitude: 37.701, longitude: -122.501 },
+              formattedAddress: "500 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        backfillLookupAttempts += 1;
+        return Response.json({
+          businesses: [
+            {
+              name: "Budget Test Restaurant",
+              rating: 4.4,
+              review_count: 321,
+              price: "$$",
+              categories: [{ title: "Cajun/Creole" }],
+              coordinates: { latitude: 37.7811, longitude: -122.4092 },
+              location: {
+                address1: "175 2nd St",
+                zip_code: "94105",
+                display_address: ["175 2nd St", "San Francisco, CA 94105"],
+              },
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    const prominentRow = payload.restaurants.find((restaurant: { name: string }) => restaurant.name === "Budget Test Restaurant");
+    expect(prominentRow).toBeTruthy();
+    expect(prominentRow.yelp.review_count).toBe(0);
+    expect(backfillLookupAttempts).toBe(0);
+
+    expect(diagnosticsSpy).toHaveBeenCalledWith(
+      "[search-diagnostics]",
+      expect.objectContaining({
+        mode: "yelp_primary",
+        yelp_backfill_attempted: 0,
+        yelp_backfill_matched: 0,
+        yelp_backfill_skipped_budget: 1,
+        yelp_backfill_skipped_time_budget: 1,
+        request_budget_mode: "degraded",
+      }),
+    );
+  });
+
+  it("applies public-profile prominent lookup cap", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.YELP_PROMINENT_LOOKUP_LIMIT_PUBLIC = "1";
+    process.env.SEARCH_DIAGNOSTICS_ENABLED = "1";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    let backfillLookupAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Existing Yelp Row",
+              city: "San Francisco",
+              yelp: {
+                rating: 4.5,
+                review_count: 1200,
+                price: "$$",
+                categories: ["Seafood"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.6,
+            review_count: 800,
+            place_id: "existing-google-place",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:existing-google-place",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({
+          places: [
+            {
+              id: "prominent-cap-1",
+              displayName: { text: "Cap Test One" },
+              rating: 4.7,
+              userRatingCount: 900,
+              location: { latitude: 37.701, longitude: -122.501 },
+              formattedAddress: "500 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+            {
+              id: "prominent-cap-2",
+              displayName: { text: "Cap Test Two" },
+              rating: 4.5,
+              userRatingCount: 700,
+              location: { latitude: 37.702, longitude: -122.502 },
+              formattedAddress: "501 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        backfillLookupAttempts += 1;
+        return Response.json({ businesses: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    expect(response.status).toBe(200);
+    expect(backfillLookupAttempts).toBe(1);
+
+    expect(diagnosticsSpy).toHaveBeenCalledWith(
+      "[search-diagnostics]",
+      expect.objectContaining({
+        mode: "yelp_primary",
+        yelp_backfill_attempted: 1,
+        yelp_backfill_skipped_lookup_cap: 1,
+        yelp_backfill_skipped_budget: 1,
+        request_budget_mode: "normal",
+      }),
+    );
+  });
+
+  it("does not apply public-profile lookup cap when server profile is private", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.YELP_PROMINENT_LOOKUP_LIMIT_PUBLIC = "1";
+    process.env.SEARCH_DIAGNOSTICS_ENABLED = "1";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    let backfillLookupAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Existing Yelp Row",
+              city: "San Francisco",
+              yelp: {
+                rating: 4.5,
+                review_count: 1200,
+                price: "$$",
+                categories: ["Seafood"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.6,
+            review_count: 800,
+            place_id: "existing-google-place",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:existing-google-place",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({
+          places: [
+            {
+              id: "prominent-private-cap-1",
+              displayName: { text: "Private Cap One" },
+              rating: 4.7,
+              userRatingCount: 900,
+              location: { latitude: 37.701, longitude: -122.501 },
+              formattedAddress: "500 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+            {
+              id: "prominent-private-cap-2",
+              displayName: { text: "Private Cap Two" },
+              rating: 4.5,
+              userRatingCount: 700,
+              location: { latitude: 37.702, longitude: -122.502 },
+              formattedAddress: "501 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        backfillLookupAttempts += 1;
+        return Response.json({ businesses: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    expect(response.status).toBe(200);
+    expect(backfillLookupAttempts).toBe(2);
+
+    expect(diagnosticsSpy).toHaveBeenCalledWith(
+      "[search-diagnostics]",
+      expect.objectContaining({
+        mode: "yelp_primary",
+        yelp_backfill_attempted: 2,
+        yelp_backfill_skipped_lookup_cap: 0,
+      }),
+    );
+  });
+
+  it("stops backfill after at least one attempt when time budget is exceeded", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.YELP_PROMINENT_BACKFILL_BUDGET_MS = "10";
+    process.env.SEARCH_DIAGNOSTICS_ENABLED = "1";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    let nowMs = 10_000;
+    vi.spyOn(Date, "now").mockImplementation(() => nowMs);
+
+    let backfillLookupAttempts = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Existing Yelp Row",
+              city: "San Francisco",
+              yelp: {
+                rating: 4.5,
+                review_count: 1200,
+                price: "$$",
+                categories: ["Seafood"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.6,
+            review_count: 800,
+            place_id: "existing-google-place",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:existing-google-place",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({
+          places: [
+            {
+              id: "prominent-budget-partial-1",
+              displayName: { text: "Budget Partial One" },
+              rating: 4.7,
+              userRatingCount: 900,
+              location: { latitude: 37.701, longitude: -122.501 },
+              formattedAddress: "500 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+            {
+              id: "prominent-budget-partial-2",
+              displayName: { text: "Budget Partial Two" },
+              rating: 4.5,
+              userRatingCount: 700,
+              location: { latitude: 37.702, longitude: -122.502 },
+              formattedAddress: "501 Ocean Ave, San Francisco, CA 94112",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      if (url.includes("api.yelp.com/v3/businesses/search")) {
+        backfillLookupAttempts += 1;
+        if (backfillLookupAttempts === 1) {
+          nowMs += 20;
+        }
+        return Response.json({ businesses: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    expect(response.status).toBe(200);
+    expect(backfillLookupAttempts).toBe(1);
+
+    expect(diagnosticsSpy).toHaveBeenCalledWith(
+      "[search-diagnostics]",
+      expect.objectContaining({
+        mode: "yelp_primary",
+        yelp_backfill_attempted: 1,
+        yelp_backfill_skipped_time_budget: 1,
+        yelp_backfill_skipped_budget: 1,
+        request_budget_mode: "degraded",
+      }),
+    );
+  });
+
+  it("serves from dynamic city cache when available", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED = "1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION = "test-cache-read-path-v1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES = "60";
+    process.env.SEARCH_DIAGNOSTICS_ENABLED = "1";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    let yelpCalls = 0;
+    let googleCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        yelpCalls += 1;
+        return Response.json({
+          city: "Cache City",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Cached Candidate",
+              city: "Cache City",
+              yelp: {
+                rating: 4.6,
+                review_count: 600,
+                price: "$$",
+                categories: ["Test"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        googleCalls += 1;
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.5,
+            review_count: 400,
+            place_id: "cache-google-1",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:cache-google-1",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({ places: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const buildRequest = () => new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Cache City" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const firstResponse = await searchPost(buildRequest());
+    const firstPayload = await firstResponse.json();
+    expect(firstResponse.status).toBe(200);
+    expect(firstPayload.restaurants).toHaveLength(1);
+    expect(yelpCalls).toBe(1);
+    expect(googleCalls).toBe(1);
+
+    const secondResponse = await searchPost(buildRequest());
+    const secondPayload = await secondResponse.json();
+    expect(secondResponse.status).toBe(200);
+    expect(secondPayload.restaurants).toHaveLength(1);
+    expect(yelpCalls).toBe(1);
+    expect(googleCalls).toBe(1);
+
+    const diagnosticsPayloads = diagnosticsSpy.mock.calls
+      .filter(([marker]) => marker === "[search-diagnostics]")
+      .map(([, payload]) => payload as Record<string, unknown>);
+    const primaryDiagnostic = diagnosticsPayloads.find((entry) => entry.mode === "yelp_primary");
+    const cacheDiagnostic = diagnosticsPayloads.find((entry) => entry.mode === "cache");
+
+    expect(primaryDiagnostic).toEqual(expect.objectContaining({
+      cache_hit: false,
+      cache_write: true,
+      cache_write_skipped_reason: null,
+      cache_ttl_minutes: expect.any(Number),
+    }));
+    expect(cacheDiagnostic).toEqual(expect.objectContaining({
+      cache_hit: true,
+      cache_write: false,
+      cache_write_skipped_reason: null,
+      cache_ttl_minutes: null,
+    }));
+  });
+
+  it("uses profile-aware cache key so private and public caches do not collide", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED = "1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION = "test-cache-profile-key-v1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES = "60";
+
+    let yelpCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        yelpCalls += 1;
+        return Response.json({
+          city: "Profile Cache City",
+          restaurants: [
+            {
+              id: "y1",
+              name: "Profile Candidate",
+              city: "Profile Cache City",
+              yelp: {
+                rating: 4.6,
+                review_count: 600,
+                price: "$$",
+                categories: ["Test"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.5,
+            review_count: 400,
+            place_id: "profile-google-1",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:profile-google-1",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({ places: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    const privateRequest = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Profile Cache City" }),
+      headers: { "content-type": "application/json" },
+    });
+    const privateResponse = await searchPost(privateRequest);
+    expect(privateResponse.status).toBe(200);
+
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    const publicRequest = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Profile Cache City" }),
+      headers: { "content-type": "application/json" },
+    });
+    const publicResponse = await searchPost(publicRequest);
+    expect(publicResponse.status).toBe(200);
+
+    expect(yelpCalls).toBe(2);
+  });
+
+  it("does not serve expired dynamic city cache entries", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED = "1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION = "test-cache-expiry-v1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES = "0";
+
+    let yelpCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        yelpCalls += 1;
+        return Response.json({
+          city: "Expiry City",
+          restaurants: [
+            {
+              id: `y-${yelpCalls}`,
+              name: `Expiry Candidate ${yelpCalls}`,
+              city: "Expiry City",
+              yelp: {
+                rating: 4.6,
+                review_count: 600,
+                price: "$$",
+                categories: ["Test"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.5,
+            review_count: 400,
+            place_id: "expiry-google-1",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:expiry-google-1",
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({ places: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const buildRequest = () => new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Expiry City" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const firstResponse = await searchPost(buildRequest());
+    expect(firstResponse.status).toBe(200);
+    const secondResponse = await searchPost(buildRequest());
+    expect(secondResponse.status).toBe(200);
+
+    expect(yelpCalls).toBe(2);
+  });
+
+  it("writes and serves cache for live google-only fallback responses", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED = "1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION = "test-cache-fallback-write-v1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES = "60";
+
+    let yelpCalls = 0;
+    let prominentCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        yelpCalls += 1;
+        return Response.json({
+          city: "Fallback Cache City",
+          restaurants: [],
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        prominentCalls += 1;
+        return Response.json({
+          places: [
+            {
+              id: "fallback-cache-1",
+              displayName: { text: "Fallback Cached Restaurant" },
+              rating: 4.5,
+              userRatingCount: 850,
+              location: { latitude: 37.781, longitude: -122.409 },
+              formattedAddress: "175 2nd St, San Francisco, CA 94105",
+              types: ["restaurant"],
+            },
+          ],
+        });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const buildRequest = () => new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Fallback Cache City" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const firstResponse = await searchPost(buildRequest());
+    const firstPayload = await firstResponse.json();
+    expect(firstResponse.status).toBe(200);
+    expect(firstPayload.google_only).toBe(true);
+    expect(firstPayload.restaurants.length).toBeGreaterThan(0);
+    expect(yelpCalls).toBe(1);
+    expect(prominentCalls).toBe(1);
+
+    const secondResponse = await searchPost(buildRequest());
+    const secondPayload = await secondResponse.json();
+    expect(secondResponse.status).toBe(200);
+    expect(secondPayload.google_only).toBe(true);
+    expect(secondPayload.restaurants.length).toBeGreaterThan(0);
+    expect(yelpCalls).toBe(1);
+    expect(prominentCalls).toBe(1);
+  });
+
+  it("does not cache degraded google-only fallback responses", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED = "1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION = "test-cache-fallback-degraded-v1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES = "60";
+    process.env.SEARCH_DIAGNOSTICS_ENABLED = "1";
+    const diagnosticsSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    let yelpCalls = 0;
+    let legacyFallbackCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        yelpCalls += 1;
+        return Response.json({
+          city: "Fallback Degraded City",
+          restaurants: [],
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return new Response("upstream error", { status: 500 });
+      }
+
+      if (url.includes("maps.googleapis.com/maps/api/place/textsearch/json")) {
+        legacyFallbackCalls += 1;
+        return new Response("upstream error", { status: 500 });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const buildRequest = () => new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Fallback Degraded City" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const firstResponse = await searchPost(buildRequest());
+    const firstPayload = await firstResponse.json();
+    expect(firstResponse.status).toBe(200);
+    expect(firstPayload.google_only).toBe(true);
+    expect(firstPayload.warnings).toEqual([
+      { code: "GOOGLE_UPSTREAM_ERROR", message: "Google fallback search failed." },
+    ]);
+
+    const secondResponse = await searchPost(buildRequest());
+    const secondPayload = await secondResponse.json();
+    expect(secondResponse.status).toBe(200);
+    expect(secondPayload.google_only).toBe(true);
+    expect(secondPayload.warnings).toEqual([
+      { code: "GOOGLE_UPSTREAM_ERROR", message: "Google fallback search failed." },
+    ]);
+
+    expect(yelpCalls).toBe(2);
+    expect(legacyFallbackCalls).toBe(2);
+
+    const diagnosticsPayloads = diagnosticsSpy.mock.calls
+      .filter(([marker]) => marker === "[search-diagnostics]")
+      .map(([, payload]) => payload as Record<string, unknown>);
+    const fallbackDiagnostic = diagnosticsPayloads.find((entry) => entry.mode === "google_fallback");
+    expect(fallbackDiagnostic).toEqual(expect.objectContaining({
+      cache_hit: false,
+      cache_write: false,
+      cache_write_skipped_reason: "warnings",
+      cache_ttl_minutes: null,
+    }));
+  });
+
+  it("prunes cache to max entries and evicts oldest key", async () => {
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    process.env.APP_PROFILE = "private";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "private";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "0";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED = "1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION = "test-cache-max-entries-v1";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES = "60";
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_MAX_ENTRIES = "1";
+
+    let yelpCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/api/yelp")) {
+        yelpCalls += 1;
+        const city = yelpCalls === 1 ? "City A" : yelpCalls === 2 ? "City B" : "City A";
+        return Response.json({
+          city,
+          restaurants: [
+            {
+              id: `y-${yelpCalls}`,
+              name: `Cache Candidate ${city}`,
+              city,
+              yelp: {
+                rating: 4.6,
+                review_count: 600,
+                price: "$$",
+                categories: ["Test"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.5,
+            review_count: 400,
+            place_id: `max-entries-google-${yelpCalls}`,
+            maps_url: `https://www.google.com/maps/place/?q=place_id:max-entries-google-${yelpCalls}`,
+          },
+        });
+      }
+
+      if (url.includes("places.googleapis.com/v1/places:searchText")) {
+        return Response.json({ places: [] });
+      }
+
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const buildRequest = (city: string) => new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const firstCityA = await searchPost(buildRequest("City A"));
+    expect(firstCityA.status).toBe(200);
+    const cityB = await searchPost(buildRequest("City B"));
+    expect(cityB.status).toBe(200);
+    const secondCityA = await searchPost(buildRequest("City A"));
+    expect(secondCityA.status).toBe(200);
+
+    expect(yelpCalls).toBe(3);
+  });
+
   it("caps normal-mode merged output at 80 rows", async () => {
     process.env.YELP_API_KEY = "test-key";
     process.env.GOOGLE_MAPS_API_KEY = "test-key";
@@ -2164,5 +3059,189 @@ describe("search orchestrator", () => {
     expect(payload.google_only).toBe(true);
     expect(payload.restaurants.length).toBeGreaterThan(0);
     expect(payload.restaurants[0].combined_score).toBeNull();
+  });
+
+  it("serves snapshot payload with google_only=true when snapshot marks Google Only", async () => {
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "1";
+    process.env.SEARCH_SNAPSHOT_VERSION = "test-google-only";
+
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const versionDir = path.join(process.cwd(), "data", "precompute", "test-google-only");
+    await fs.mkdir(versionDir, { recursive: true });
+
+    const nowIso = new Date().toISOString();
+    const summary = {
+      version: "test-google-only",
+      finished_at_utc: nowIso,
+      results: [{ city: "Seoul, South Korea", slug: "seoul-south-korea", success: true }],
+    };
+    await fs.writeFile(path.join(versionDir, "_run-summary.json"), JSON.stringify(summary), "utf8");
+    await fs.writeFile(
+      path.join(versionDir, "seoul-south-korea.csv"),
+      [
+        "Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL,Snapshot UTC,Google Only",
+        `1,Seoul Snapshot Place,8.4,1200,,,4.6,1200,,Korean,"Seoul, South Korea",https://www.google.com/maps/place/?q=place_id:seoul-place,${nowIso},true`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    global.fetch = vi.fn(async () => {
+      throw new Error("Snapshot path should not call upstream fetch.");
+    }) as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "Seoul, South Korea" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.google_only).toBe(true);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].combined_score).toBeNull();
+
+    await fs.rm(versionDir, { recursive: true, force: true });
+  });
+
+  it("serves snapshot from configured HTTP base when local files are unavailable", async () => {
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "1";
+    process.env.SEARCH_SNAPSHOT_VERSION = "test-http-fallback";
+    process.env.SEARCH_SNAPSHOT_HTTP_BASE_URL = "https://snapshots.example.com/precompute";
+
+    const nowIso = new Date().toISOString();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://snapshots.example.com/precompute/test-http-fallback/_run-summary.json") {
+        return Response.json({
+          version: "test-http-fallback",
+          finished_at_utc: nowIso,
+          results: [{ city: "San Francisco, CA", slug: "san-francisco-ca", success: true }],
+        });
+      }
+      if (url === "https://snapshots.example.com/precompute/test-http-fallback/san-francisco-ca.csv") {
+        return new Response(
+          [
+            "Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL,Snapshot UTC,Google Only",
+            `1,HTTP Snapshot Place,8.8,1500,4.6,500,4.7,1000,$$,American,\"San Francisco, CA\",https://www.google.com/maps/place/?q=place_id:http-snapshot-1,${nowIso},false`,
+          ].join("\n"),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco, CA" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("HTTP Snapshot Place");
+    expect(payload.google_only).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://snapshots.example.com/precompute/test-http-fallback/_run-summary.json",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://snapshots.example.com/precompute/test-http-fallback/san-francisco-ca.csv",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+  });
+
+  it("ignores malformed snapshot timestamp and falls back to live path", async () => {
+    process.env.APP_PROFILE = "public";
+    process.env.NEXT_PUBLIC_APP_PROFILE = "public";
+    process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED = "1";
+    process.env.SEARCH_SNAPSHOT_VERSION = "test-bad-snapshot-ts";
+    process.env.YELP_API_KEY = "test-key";
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+    const versionDir = path.join(process.cwd(), "data", "precompute", "test-bad-snapshot-ts");
+    await fs.mkdir(versionDir, { recursive: true });
+
+    const summary = {
+      version: "test-bad-snapshot-ts",
+      finished_at_utc: "not-a-date",
+      results: [{ city: "San Francisco, CA", slug: "san-francisco-ca", success: true }],
+    };
+    await fs.writeFile(path.join(versionDir, "_run-summary.json"), JSON.stringify(summary), "utf8");
+    await fs.writeFile(
+      path.join(versionDir, "san-francisco-ca.csv"),
+      [
+        "Rank,Restaurant,Score,Total Reviews,Yelp Rating,Yelp Reviews,Google Rating,Google Reviews,Price,Cuisine,City,Google Maps URL,Snapshot UTC,Google Only",
+        "1,Bad Timestamp Snapshot,8.9,1000,4.5,100,4.7,900,$$,American,\"San Francisco, CA\",https://www.google.com/maps/place/?q=place_id:bad-ts,not-a-date,false",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/yelp")) {
+        return Response.json({
+          city: "San Francisco, CA",
+          restaurants: [
+            {
+              id: "y-live-1",
+              name: "Live Fallback Row",
+              city: "San Francisco, CA",
+              yelp: {
+                rating: 4.2,
+                review_count: 150,
+                price: "$$",
+                categories: ["American"],
+                lat: 37.77,
+                lng: -122.42,
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/google")) {
+        return Response.json({
+          ok: true,
+          google: {
+            rating: 4.5,
+            review_count: 700,
+            place_id: "live-google-1",
+            maps_url: "https://www.google.com/maps/place/?q=place_id:live-google-1",
+          },
+        });
+      }
+      throw new Error(`Unexpected fetch target: ${url}`);
+    });
+    global.fetch = fetchMock as typeof fetch;
+
+    const request = new Request("http://localhost/api/search", {
+      method: "POST",
+      body: JSON.stringify({ city: "San Francisco, CA" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const response = await searchPost(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.restaurants).toHaveLength(1);
+    expect(payload.restaurants[0].name).toBe("Live Fallback Row");
+    expect(payload.google_only).not.toBe(true);
+    expect(fetchMock).toHaveBeenCalled();
+
+    await fs.rm(versionDir, { recursive: true, force: true });
   });
 });

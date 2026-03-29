@@ -4,13 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/sync-precompute-to-public.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ci": "vitest run --coverage --passWithNoTests",
-    "precompute:pilot": "node scripts/precompute-cities.mjs"
+    "precompute:pilot": "node scripts/precompute-cities.mjs",
+    "sync:snapshots": "node scripts/sync-precompute-to-public.mjs"
   },
   "dependencies": {
     "next": "16.2.1",

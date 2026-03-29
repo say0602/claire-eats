@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Restaurant, SearchResponseFailure, SearchResponseSuccess, SearchWarning, WarningCode } from "@/lib/types";
 import { getServerEnv } from "@/lib/env";
-import { getServerAppProfile } from "@/lib/app-profile";
+import { getServerAppProfile, type AppProfile } from "@/lib/app-profile";
 import {
   buildMapsUrl,
   getAddressSimilarity,
@@ -46,7 +46,16 @@ const YELP_PROMINENT_BACKFILL_DELAY_MS_LOCAL = 120;
 const YELP_PROMINENT_BACKFILL_DELAY_MS_DEPLOYED_DEFAULT = 700;
 const YELP_PROMINENT_RATE_LIMIT_RETRY_DELAY_MS_DEPLOYED_DEFAULT = 2500;
 const YELP_PROMINENT_MAX_CONSECUTIVE_429_DEPLOYED_DEFAULT = 20;
+const YELP_PROMINENT_BACKFILL_BUDGET_MS_DEFAULT = 30_000;
 const YELP_RATE_LIMITED_SENTINEL = Symbol("YELP_RATE_LIMITED");
+const DYNAMIC_CITY_CACHE_VERSION_DEFAULT = "phase-h-v1";
+const DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES_DEFAULT = 20;
+const DYNAMIC_CITY_CACHE_TTL_HOT_MINUTES_DEFAULT = 60;
+const DYNAMIC_CITY_CACHE_HOT_HIT_THRESHOLD_DEFAULT = 3;
+const DYNAMIC_CITY_CACHE_MAX_ENTRIES_DEFAULT = 200;
+const SNAPSHOT_VERSION_DEFAULT = "pilot-v1";
+const SNAPSHOT_MAX_AGE_MINUTES_DEFAULT = 24 * 60;
+const SNAPSHOT_MANIFEST_CACHE_TTL_MS = 60_000;
 
 function devLog(...args: unknown[]) {
   if (process.env.NODE_ENV !== "development") return;
@@ -109,7 +118,7 @@ type GoogleProminentMetrics = {
 };
 
 type SearchDiagnostics = {
-  mode: "yelp_primary" | "google_fallback" | "yelp_error";
+  mode: "yelp_primary" | "google_fallback" | "yelp_error" | "snapshot" | "cache";
   city: string;
   total_ms: number;
   yelp_status: string;
@@ -125,8 +134,69 @@ type SearchDiagnostics = {
   google_prominent_added: number;
   google_prominent_deduped: number;
   google_prominent_ms: number | null;
+  snapshot_served: boolean;
+  snapshot_age_minutes: number | null;
+  google_prefill_matches: number;
+  yelp_backfill_attempted: number;
+  yelp_backfill_matched: number;
+  yelp_backfill_skipped_budget: number;
+  yelp_backfill_skipped_lookup_cap?: number;
+  yelp_backfill_skipped_time_budget?: number;
+  yelp_backfill_skipped_rate_limit_stop?: number;
+  yelp_backfill_skipped_no_api_key?: number;
+  cache_hit?: boolean;
+  cache_write?: boolean;
+  cache_write_skipped_reason?: "warnings" | "degraded" | null;
+  cache_ttl_minutes?: number | null;
+  request_budget_mode: "normal" | "degraded";
   warning_codes: WarningCode[];
 };
+
+type YelpBackfillMetrics = {
+  attempted: number;
+  matched: number;
+  skipped_budget: number;
+  skipped_lookup_cap: number;
+  skipped_time_budget: number;
+  skipped_rate_limit_stop: number;
+  skipped_no_api_key: number;
+};
+
+type SearchProfilePolicy = {
+  maxGoogleEnrichments: number;
+  yelpProminentLookupLimit: number;
+  yelpProminentBackfillDelayMs: number;
+  yelpProminentRateLimitRetryDelayMs: number;
+  yelpProminentMaxConsecutive429: number;
+  yelpProminentBackfillBudgetMs: number;
+};
+
+type DynamicCityCacheValue = {
+  city: string;
+  restaurants: Restaurant[];
+  warnings: SearchWarning[];
+  google_only?: boolean;
+};
+
+type DynamicCityCacheEntry = {
+  value: DynamicCityCacheValue;
+  expiresAtMs: number;
+};
+
+type SnapshotManifestEntry = {
+  city: string;
+  slug: string;
+};
+
+type SnapshotManifestCache = {
+  version: string;
+  expiresAtMs: number;
+  value: { finishedAtUtc: string | null; entries: SnapshotManifestEntry[] } | null;
+};
+
+let snapshotManifestCache: SnapshotManifestCache | null = null;
+const dynamicCityCache = new Map<string, DynamicCityCacheEntry>();
+const dynamicCityCacheHitCounts = new Map<string, number>();
 
 function isGoogleRecord(value: unknown): value is Restaurant["google"] {
   if (!value || typeof value !== "object") return false;
@@ -253,6 +323,419 @@ function getProminentMaxConsecutive429(isLocal: boolean) {
     process.env.YELP_PROMINENT_MAX_CONSECUTIVE_429_DEPLOYED,
     YELP_PROMINENT_MAX_CONSECUTIVE_429_DEPLOYED_DEFAULT,
   );
+}
+
+function getProminentLookupLimit(isLocal: boolean, appProfile: AppProfile) {
+  const baseLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : getDeployedProminentLookupLimit();
+  if (appProfile !== "public") return baseLimit;
+  const publicLimit = parseNonNegativeIntegerEnv(process.env.YELP_PROMINENT_LOOKUP_LIMIT_PUBLIC, baseLimit);
+  return Math.min(baseLimit, publicLimit);
+}
+
+function getProminentBackfillBudgetMs() {
+  return parseNonNegativeIntegerEnv(
+    process.env.YELP_PROMINENT_BACKFILL_BUDGET_MS,
+    YELP_PROMINENT_BACKFILL_BUDGET_MS_DEFAULT,
+  );
+}
+
+function buildSearchProfilePolicy(isLocal: boolean, appProfile: AppProfile): SearchProfilePolicy {
+  const maxGoogleEnrichments = isLocal ? MAX_GOOGLE_ENRICHMENTS : DEPLOYED_MAX_GOOGLE_ENRICHMENTS;
+  return {
+    maxGoogleEnrichments,
+    yelpProminentLookupLimit: getProminentLookupLimit(isLocal, appProfile),
+    yelpProminentBackfillDelayMs: getProminentBackfillDelayMs(isLocal),
+    yelpProminentRateLimitRetryDelayMs: getProminentRateLimitRetryDelayMs(isLocal),
+    yelpProminentMaxConsecutive429: getProminentMaxConsecutive429(isLocal),
+    yelpProminentBackfillBudgetMs: getProminentBackfillBudgetMs(),
+  };
+}
+
+function toCitySlug(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function parseSnapshotEnabled() {
+  if (process.env.NODE_ENV === "test") {
+    return process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED === "1";
+  }
+  const raw = process.env.SEARCH_SNAPSHOT_PUBLIC_ENABLED;
+  if (!raw) return true;
+  const normalized = raw.trim().toLowerCase();
+  if (["0", "false", "off", "no"].includes(normalized)) return false;
+  if (["1", "true", "on", "yes"].includes(normalized)) return true;
+  return true;
+}
+
+function parseDynamicCityCacheEnabled() {
+  if (process.env.NODE_ENV === "test") {
+    return process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED === "1";
+  }
+  const raw = process.env.SEARCH_DYNAMIC_CITY_CACHE_ENABLED;
+  if (!raw) return true;
+  const normalized = raw.trim().toLowerCase();
+  if (["0", "false", "off", "no"].includes(normalized)) return false;
+  if (["1", "true", "on", "yes"].includes(normalized)) return true;
+  return true;
+}
+
+function getDynamicCityCacheVersion() {
+  const raw = process.env.SEARCH_DYNAMIC_CITY_CACHE_VERSION?.trim();
+  return raw && raw.length > 0 ? raw : DYNAMIC_CITY_CACHE_VERSION_DEFAULT;
+}
+
+function getDynamicCityCacheColdTtlMinutes() {
+  return parseNonNegativeIntegerEnv(
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES,
+    DYNAMIC_CITY_CACHE_TTL_COLD_MINUTES_DEFAULT,
+  );
+}
+
+function getDynamicCityCacheHotTtlMinutes() {
+  return parseNonNegativeIntegerEnv(
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_TTL_HOT_MINUTES,
+    DYNAMIC_CITY_CACHE_TTL_HOT_MINUTES_DEFAULT,
+  );
+}
+
+function getDynamicCityCacheHotHitThreshold() {
+  return parseNonNegativeIntegerEnv(
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_HOT_HIT_THRESHOLD,
+    DYNAMIC_CITY_CACHE_HOT_HIT_THRESHOLD_DEFAULT,
+  );
+}
+
+function getDynamicCityCacheMaxEntries() {
+  return parseNonNegativeIntegerEnv(
+    process.env.SEARCH_DYNAMIC_CITY_CACHE_MAX_ENTRIES,
+    DYNAMIC_CITY_CACHE_MAX_ENTRIES_DEFAULT,
+  );
+}
+
+function buildDynamicCityCacheKey(city: string, appProfile: AppProfile, version: string) {
+  return `${version}:${appProfile}:${toCitySlug(city)}`;
+}
+
+function pruneDynamicCityCache(maxEntries: number) {
+  const nowMs = Date.now();
+  for (const [key, entry] of dynamicCityCache.entries()) {
+    if (entry.expiresAtMs <= nowMs) {
+      dynamicCityCache.delete(key);
+      dynamicCityCacheHitCounts.delete(key);
+    }
+  }
+
+  if (maxEntries <= 0) {
+    dynamicCityCache.clear();
+    dynamicCityCacheHitCounts.clear();
+    return;
+  }
+
+  while (dynamicCityCache.size >= maxEntries) {
+    const oldestKey = dynamicCityCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    dynamicCityCache.delete(oldestKey);
+    dynamicCityCacheHitCounts.delete(oldestKey);
+  }
+}
+
+function tryGetDynamicCityCache(city: string, appProfile: AppProfile): DynamicCityCacheValue | null {
+  if (!parseDynamicCityCacheEnabled()) return null;
+  pruneDynamicCityCache(getDynamicCityCacheMaxEntries());
+  const key = buildDynamicCityCacheKey(city, appProfile, getDynamicCityCacheVersion());
+  const entry = dynamicCityCache.get(key);
+  if (!entry) return null;
+  if (Date.now() >= entry.expiresAtMs) {
+    dynamicCityCache.delete(key);
+    dynamicCityCacheHitCounts.delete(key);
+    return null;
+  }
+  const hitCount = (dynamicCityCacheHitCounts.get(key) ?? 0) + 1;
+  dynamicCityCacheHitCounts.set(key, hitCount);
+  return entry.value;
+}
+
+function maybeSetDynamicCityCache(city: string, appProfile: AppProfile, value: DynamicCityCacheValue) {
+  if (!parseDynamicCityCacheEnabled()) return;
+  const key = buildDynamicCityCacheKey(city, appProfile, getDynamicCityCacheVersion());
+  const hitCount = dynamicCityCacheHitCounts.get(key) ?? 0;
+  const hotThreshold = getDynamicCityCacheHotHitThreshold();
+  const coldTtlMinutes = getDynamicCityCacheColdTtlMinutes();
+  const hotTtlMinutes = getDynamicCityCacheHotTtlMinutes();
+  const ttlMinutes = hitCount >= hotThreshold ? hotTtlMinutes : coldTtlMinutes;
+  const ttlMs = Math.max(0, ttlMinutes * 60_000);
+  pruneDynamicCityCache(getDynamicCityCacheMaxEntries());
+  dynamicCityCache.set(key, {
+    value,
+    expiresAtMs: Date.now() + ttlMs,
+  });
+  return ttlMinutes;
+}
+
+function shouldWriteDynamicCityCache(
+  response: SearchResponseSuccess,
+  requestBudgetMode: "normal" | "degraded" = "normal",
+) {
+  if (response.warnings.length > 0) return { write: false, reason: "warnings" as const };
+  if (requestBudgetMode !== "normal") return { write: false, reason: "degraded" as const };
+  return { write: true, reason: null };
+}
+
+function getCacheDiagnostics(write: boolean, reason: "warnings" | "degraded" | null, ttlMinutes: number | null) {
+  return {
+    cache_hit: false,
+    cache_write: write,
+    cache_write_skipped_reason: reason,
+    cache_ttl_minutes: ttlMinutes,
+  };
+}
+
+function parseCsvLine(line: string) {
+  const values: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === "\"") {
+      const next = line[i + 1];
+      if (inQuotes && next === "\"") {
+        current += "\"";
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (char === "," && !inQuotes) {
+      values.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  values.push(current);
+  return values;
+}
+
+function parseNumber(value: string | undefined) {
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseBooleanString(value: string | undefined) {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
+}
+
+function parsePlaceIdFromMapsUrl(url: string | null) {
+  if (!url) return null;
+  const match = /[?&]q=place_id:([^&]+)/.exec(url);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+async function tryReadFile(filePath: string) {
+  try {
+    const fs = await import("node:fs/promises");
+    return await fs.readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function normalizeBaseUrl(url: string) {
+  return url.replace(/\/+$/, "");
+}
+
+function getSnapshotHttpBaseUrl(origin: string) {
+  const configured = process.env.SEARCH_SNAPSHOT_HTTP_BASE_URL?.trim();
+  if (configured) return normalizeBaseUrl(configured);
+  if (process.env.NODE_ENV === "test") return null;
+  return `${normalizeBaseUrl(origin)}/precompute`;
+}
+
+async function tryFetchSnapshotText(origin: string, version: string, fileName: string) {
+  const baseUrl = getSnapshotHttpBaseUrl(origin);
+  if (!baseUrl) return null;
+  const versionSegment = encodeURIComponent(version);
+  const fileSegment = encodeURIComponent(fileName);
+  const url = `${baseUrl}/${versionSegment}/${fileSegment}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    return await response.text();
+  } catch {
+    return null;
+  }
+}
+
+async function loadSnapshotManifest(version: string, origin: string) {
+  if (
+    snapshotManifestCache &&
+    snapshotManifestCache.version === version &&
+    snapshotManifestCache.expiresAtMs > Date.now()
+  ) {
+    return snapshotManifestCache.value;
+  }
+
+  try {
+    const path = await import("node:path");
+    const summaryPath = path.join(process.cwd(), "data", "precompute", version, "_run-summary.json");
+    const raw = (await tryReadFile(summaryPath)) ?? (await tryFetchSnapshotText(origin, version, "_run-summary.json"));
+    if (!raw) {
+      snapshotManifestCache = {
+        version,
+        expiresAtMs: Date.now() + SNAPSHOT_MANIFEST_CACHE_TTL_MS,
+        value: null,
+      };
+      return null;
+    }
+    const parsed = JSON.parse(raw) as {
+      finished_at_utc?: string;
+      results?: Array<{ city?: string; slug?: string; success?: boolean }>;
+    };
+    const results = Array.isArray(parsed.results) ? parsed.results : [];
+    const entries: SnapshotManifestEntry[] = results
+      .filter((entry) => entry.success && typeof entry.city === "string" && typeof entry.slug === "string")
+      .map((entry) => ({
+        city: entry.city as string,
+        slug: entry.slug as string,
+      }));
+    const manifestValue = entries.length > 0
+      ? { finishedAtUtc: parsed.finished_at_utc ?? null, entries }
+      : null;
+    snapshotManifestCache = {
+      version,
+      expiresAtMs: Date.now() + SNAPSHOT_MANIFEST_CACHE_TTL_MS,
+      value: manifestValue,
+    };
+    return manifestValue;
+  } catch {
+    snapshotManifestCache = {
+      version,
+      expiresAtMs: Date.now() + SNAPSHOT_MANIFEST_CACHE_TTL_MS,
+      value: null,
+    };
+    return null;
+  }
+}
+
+function buildSnapshotRestaurant(row: Record<string, string>, index: number, fallbackCity: string) {
+  const mapsUrl = row["Google Maps URL"]?.trim() || null;
+  const googlePlaceId = parsePlaceIdFromMapsUrl(mapsUrl);
+  const yelpReviews = parseNumber(row["Yelp Reviews"]);
+  const yelpRating = parseNumber(row["Yelp Rating"]);
+  const googleReviews = parseNumber(row["Google Reviews"]);
+  const googleRating = parseNumber(row["Google Rating"]);
+  const score = parseNumber(row["Score"]);
+  const city = row["City"]?.trim() || fallbackCity;
+  const cuisine = row.Cuisine?.trim() || "";
+  const categories = cuisine.length > 0 ? cuisine.split(",").map((item) => item.trim()).filter(Boolean) : [];
+
+  return {
+    id: `snapshot-${toCitySlug(city)}-${index + 1}`,
+    name: row.Restaurant?.trim() || "Unknown",
+    city,
+    yelp: {
+      rating: yelpRating ?? 0,
+      review_count: yelpReviews ?? 0,
+      price: (row.Price?.trim() as Restaurant["yelp"]["price"]) || null,
+      categories,
+      lat: 0,
+      lng: 0,
+      address: null,
+      postal_code: null,
+    },
+    google: {
+      rating: googleRating,
+      review_count: googleReviews,
+      place_id: googlePlaceId,
+      maps_url: mapsUrl,
+    },
+    michelin: { award: null, green_star: false, matched: false },
+    combined_score: score,
+  } satisfies Restaurant;
+}
+
+async function tryLoadCitySnapshot(city: string, origin: string) {
+  if (getServerAppProfile() !== "public") return null;
+  if (!parseSnapshotEnabled()) return null;
+
+  const version = process.env.SEARCH_SNAPSHOT_VERSION || SNAPSHOT_VERSION_DEFAULT;
+  const manifest = await loadSnapshotManifest(version, origin);
+  if (!manifest) return null;
+
+  const citySlug = toCitySlug(city);
+  const exactManifestEntry =
+    manifest.entries.find((entry) => toCitySlug(entry.city) === citySlug) ??
+    manifest.entries.find((entry) => entry.slug === citySlug);
+  let manifestEntry = exactManifestEntry;
+  if (!manifestEntry) {
+    const prefixedEntries = manifest.entries.filter((entry) => entry.slug.startsWith(`${citySlug}-`));
+    if (prefixedEntries.length === 1) {
+      manifestEntry = prefixedEntries[0];
+    } else {
+      return null;
+    }
+  }
+
+  const path = await import("node:path");
+  const csvPath = path.join(process.cwd(), "data", "precompute", version, `${manifestEntry.slug}.csv`);
+  const rawCsv = (await tryReadFile(csvPath)) ?? (await tryFetchSnapshotText(origin, version, `${manifestEntry.slug}.csv`));
+  if (!rawCsv) return null;
+
+  const lines = rawCsv
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length < 2) return null;
+
+  const headers = parseCsvLine(lines[0]);
+  const rows = lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    const row: Record<string, string> = {};
+    for (let i = 0; i < headers.length; i += 1) {
+      row[headers[i]] = values[i] ?? "";
+    }
+    return row;
+  });
+
+  const restaurants = rows.map((row, index) => buildSnapshotRestaurant(row, index, city));
+  if (restaurants.length === 0) return null;
+
+  const generatedAtUtc =
+    rows[0]?.["Snapshot UTC"]?.trim() ||
+    manifest.finishedAtUtc ||
+    null;
+  let ageMinutes: number | null = null;
+  if (generatedAtUtc) {
+    const generatedAtMs = Date.parse(generatedAtUtc);
+    if (!Number.isFinite(generatedAtMs)) return null;
+    ageMinutes = Math.max(0, Math.floor((Date.now() - generatedAtMs) / 60000));
+  }
+  const maxAgeMinutes = parseNonNegativeIntegerEnv(
+    process.env.SEARCH_SNAPSHOT_MAX_AGE_MINUTES,
+    SNAPSHOT_MAX_AGE_MINUTES_DEFAULT,
+  );
+  if (ageMinutes !== null && ageMinutes > maxAgeMinutes) return null;
+  const googleOnly = parseBooleanString(rows[0]?.["Google Only"]);
+
+  return {
+    restaurants: restaurants.slice(0, MERGED_RESULT_LIMIT),
+    ageMinutes,
+    googleOnly,
+  };
 }
 
 async function fetchGoogleEnrichment(
@@ -437,31 +920,84 @@ async function backfillProminentRowsWithYelpData(
   city: string,
   prominentRows: Restaurant[],
   isLocal: boolean,
+  policy: SearchProfilePolicy,
 ) {
-  if (prominentRows.length === 0) return;
+  if (prominentRows.length === 0) {
+    return {
+      attempted: 0,
+      matched: 0,
+      skipped_budget: 0,
+      skipped_lookup_cap: 0,
+      skipped_time_budget: 0,
+      skipped_rate_limit_stop: 0,
+      skipped_no_api_key: 0,
+    } satisfies YelpBackfillMetrics;
+  }
 
   let yelpApiKey: string;
   try {
     yelpApiKey = getServerEnv().YELP_API_KEY;
   } catch {
-    return;
+    return {
+      attempted: 0,
+      matched: 0,
+      skipped_budget: prominentRows.length,
+      skipped_lookup_cap: 0,
+      skipped_time_budget: 0,
+      skipped_rate_limit_stop: 0,
+      skipped_no_api_key: prominentRows.length,
+    } satisfies YelpBackfillMetrics;
   }
 
-  const lookupLimit = isLocal ? YELP_PROMINENT_LOOKUP_LIMIT_LOCAL : getDeployedProminentLookupLimit();
-  const backfillDelayMs = getProminentBackfillDelayMs(isLocal);
-  const rateLimitRetryDelayMs = getProminentRateLimitRetryDelayMs(isLocal);
-  const maxConsecutive429 = getProminentMaxConsecutive429(isLocal);
+  const lookupLimit = policy.yelpProminentLookupLimit;
+  const backfillDelayMs = policy.yelpProminentBackfillDelayMs;
+  const rateLimitRetryDelayMs = policy.yelpProminentRateLimitRetryDelayMs;
+  const maxConsecutive429 = policy.yelpProminentMaxConsecutive429;
+  const backfillBudgetMs = policy.yelpProminentBackfillBudgetMs;
+  const backfillStartedAtMs = Date.now();
   const targetRows = prominentRows.slice(0, Math.min(lookupLimit, prominentRows.length));
-  if (targetRows.length === 0) return;
+  const skippedLookupCap = Math.max(0, prominentRows.length - targetRows.length);
+  if (targetRows.length === 0) {
+    return {
+      attempted: 0,
+      matched: 0,
+      skipped_budget: prominentRows.length,
+      skipped_lookup_cap: prominentRows.length,
+      skipped_time_budget: 0,
+      skipped_rate_limit_stop: 0,
+      skipped_no_api_key: 0,
+    } satisfies YelpBackfillMetrics;
+  }
+  const isBudgetExceeded = () => Date.now() - backfillStartedAtMs >= backfillBudgetMs;
+  const logBudgetExhausted = (remaining: number) => {
+    devLog("[prominent-yelp] budget exhausted, stopping backfill", {
+      city,
+      attempted: attemptedCount,
+      remaining,
+      budget_ms: backfillBudgetMs,
+    });
+  };
 
   let backfilledCount = 0;
   let attemptedCount = 0;
   let rateLimited = false;
   let consecutive429Count = 0;
+  let budgetExceeded = false;
+  let stoppedByRateLimit = false;
 
   for (let i = 0; i < targetRows.length; i += 1) {
+    if (isBudgetExceeded()) {
+      logBudgetExhausted(targetRows.length - i);
+      budgetExceeded = true;
+      break;
+    }
     if (i > 0 && process.env.NODE_ENV !== "test" && backfillDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, backfillDelayMs));
+      if (isBudgetExceeded()) {
+        logBudgetExhausted(targetRows.length - i);
+        budgetExceeded = true;
+        break;
+      }
     }
     const restaurant = targetRows[i];
     let yelpData: Restaurant["yelp"] | null = null;
@@ -476,9 +1012,20 @@ async function backfillProminentRowsWithYelpData(
       // Deployed traffic can spike into transient 429s. Retry once with cooldown
       // before giving up and stopping backfill for this request.
       if (attempt === 0 && process.env.NODE_ENV !== "test" && rateLimitRetryDelayMs > 0) {
+        if (isBudgetExceeded()) {
+          logBudgetExhausted(targetRows.length - i);
+          budgetExceeded = true;
+          break;
+        }
         await new Promise((resolve) => setTimeout(resolve, rateLimitRetryDelayMs));
+        if (isBudgetExceeded()) {
+          logBudgetExhausted(targetRows.length - i);
+          budgetExceeded = true;
+          break;
+        }
       }
     }
+    if (budgetExceeded) break;
 
     if (stillRateLimited && yelpData === (YELP_RATE_LIMITED_SENTINEL as unknown)) {
       consecutive429Count += 1;
@@ -486,9 +1033,20 @@ async function backfillProminentRowsWithYelpData(
       if (!isLocal && process.env.NODE_ENV !== "test" && rateLimitRetryDelayMs > 0) {
         // Exponential-style cooldown between rate-limited rows to recover capacity.
         const multiplier = Math.min(4, consecutive429Count);
+        if (isBudgetExceeded()) {
+          logBudgetExhausted(targetRows.length - i);
+          budgetExceeded = true;
+          break;
+        }
         await new Promise((resolve) => setTimeout(resolve, rateLimitRetryDelayMs * multiplier));
+        if (isBudgetExceeded()) {
+          logBudgetExhausted(targetRows.length - i);
+          budgetExceeded = true;
+          break;
+        }
       }
       if (consecutive429Count >= maxConsecutive429) {
+        stoppedByRateLimit = true;
         devLog("[prominent-yelp] rate-limited, stopping backfill", {
           city,
           attempted: attemptedCount,
@@ -513,6 +1071,21 @@ async function backfillProminentRowsWithYelpData(
     skipped: prominentRows.length - targetRows.length,
     rate_limited: rateLimited,
   });
+
+  const unattemptedTargetRows = Math.max(0, targetRows.length - attemptedCount);
+  const skippedTimeBudget = budgetExceeded ? unattemptedTargetRows : 0;
+  const skippedRateLimitStop = stoppedByRateLimit ? unattemptedTargetRows : 0;
+  const skippedBudget = skippedLookupCap + skippedTimeBudget + skippedRateLimitStop;
+
+  return {
+    attempted: attemptedCount,
+    matched: backfilledCount,
+    skipped_budget: skippedBudget,
+    skipped_lookup_cap: skippedLookupCap,
+    skipped_time_budget: skippedTimeBudget,
+    skipped_rate_limit_stop: skippedRateLimitStop,
+    skipped_no_api_key: 0,
+  } satisfies YelpBackfillMetrics;
 }
 
 function countWarningCodes(warnings: SearchWarning[]) {
@@ -524,7 +1097,8 @@ function countWarningCodes(warnings: SearchWarning[]) {
 }
 
 function logSearchDiagnostics(diagnostics: SearchDiagnostics) {
-  if (process.env.NODE_ENV !== "development") return;
+  const enableProdDiagnostics = process.env.SEARCH_DIAGNOSTICS_ENABLED === "1";
+  if (process.env.NODE_ENV !== "development" && !enableProdDiagnostics) return;
   console.info("[search-diagnostics]", diagnostics);
 }
 
@@ -1112,6 +1686,7 @@ async function fetchGoogleFallbackRows(
 
 async function googleOnlyFallback(
   city: string,
+  appProfile: AppProfile,
   context: { requestStartedAtMs: number; yelpStatus: string; yelpMs: number | null },
   prefetchedProminent?: { restaurants: Restaurant[]; warnings: SearchWarning[] },
   prefetchedProminentMs?: number | null,
@@ -1123,6 +1698,18 @@ async function googleOnlyFallback(
   const accepted = scored.filter((restaurant) => hasGoogleData(restaurant.google)).length;
   const warningCodes = fallback.warnings.map((warning) => warning.code);
   const fallbackFailureCounts = countWarningCodes(fallback.warnings);
+
+  const response: SearchResponseSuccess = {
+    city,
+    restaurants: toProfileRestaurants(scored),
+    warnings: fallback.warnings,
+    google_only: true,
+  };
+  const cacheWriteDecision = shouldWriteDynamicCityCache(response);
+  const cacheTtlMinutes = cacheWriteDecision.write
+    ? maybeSetDynamicCityCache(city, appProfile, response) ?? null
+    : null;
+  const cacheDiagnostics = getCacheDiagnostics(cacheWriteDecision.write, cacheWriteDecision.reason, cacheTtlMinutes);
 
   logSearchDiagnostics({
     mode: "google_fallback",
@@ -1141,15 +1728,21 @@ async function googleOnlyFallback(
     google_prominent_added: fallback.prominent.added,
     google_prominent_deduped: fallback.prominent.deduped,
     google_prominent_ms: prefetchedProminentMs ?? null,
+    snapshot_served: false,
+    snapshot_age_minutes: null,
+    google_prefill_matches: 0,
+    yelp_backfill_attempted: 0,
+    yelp_backfill_matched: 0,
+    yelp_backfill_skipped_budget: 0,
+    yelp_backfill_skipped_lookup_cap: 0,
+    yelp_backfill_skipped_time_budget: 0,
+    yelp_backfill_skipped_rate_limit_stop: 0,
+    yelp_backfill_skipped_no_api_key: 0,
+    request_budget_mode: warningCodes.length > 0 ? "degraded" : "normal",
     warning_codes: warningCodes,
+    ...cacheDiagnostics,
   });
 
-  const response: SearchResponseSuccess = {
-    city,
-    restaurants: toProfileRestaurants(scored),
-    warnings: fallback.warnings,
-    google_only: true,
-  };
   return NextResponse.json(response);
 }
 
@@ -1171,6 +1764,93 @@ export async function POST(request: Request) {
       status: 400,
     });
   }
+  const appProfile = getServerAppProfile();
+  const origin = new URL(request.url).origin;
+
+  const snapshot = await tryLoadCitySnapshot(city, origin);
+  if (snapshot) {
+    logSearchDiagnostics({
+      mode: "snapshot",
+      city,
+      total_ms: Date.now() - requestStartedAtMs,
+      yelp_status: "snapshot",
+      yelp_ms: null,
+      google_ms: null,
+      google_rows_attempted: 0,
+      google_rows_response_ok: 0,
+      google_rows_accepted: snapshot.restaurants.filter((restaurant) => hasGoogleData(restaurant.google)).length,
+      google_enrichment_failures: {},
+      google_match_rate: null,
+      michelin_match_rate: null,
+      google_prominent_fetched: 0,
+      google_prominent_added: 0,
+      google_prominent_deduped: 0,
+      google_prominent_ms: null,
+      snapshot_served: true,
+      snapshot_age_minutes: snapshot.ageMinutes,
+      google_prefill_matches: 0,
+      yelp_backfill_attempted: 0,
+      yelp_backfill_matched: 0,
+      yelp_backfill_skipped_budget: 0,
+      yelp_backfill_skipped_lookup_cap: 0,
+      yelp_backfill_skipped_time_budget: 0,
+      yelp_backfill_skipped_rate_limit_stop: 0,
+      yelp_backfill_skipped_no_api_key: 0,
+      cache_hit: false,
+      cache_write: false,
+      cache_write_skipped_reason: null,
+      cache_ttl_minutes: null,
+      request_budget_mode: "normal",
+      warning_codes: [],
+    });
+
+    const response: SearchResponseSuccess = {
+      city,
+      restaurants: toProfileRestaurants(snapshot.restaurants),
+      warnings: [],
+      google_only: snapshot.googleOnly ? true : undefined,
+    };
+    return NextResponse.json(response);
+  }
+
+  const cachedResponse = tryGetDynamicCityCache(city, appProfile);
+  if (cachedResponse) {
+    logSearchDiagnostics({
+      mode: "cache",
+      city,
+      total_ms: Date.now() - requestStartedAtMs,
+      yelp_status: "cache_hit",
+      yelp_ms: null,
+      google_ms: null,
+      google_rows_attempted: 0,
+      google_rows_response_ok: 0,
+      google_rows_accepted: cachedResponse.restaurants.filter((restaurant) => hasGoogleData(restaurant.google)).length,
+      google_enrichment_failures: {},
+      google_match_rate: null,
+      michelin_match_rate: null,
+      google_prominent_fetched: 0,
+      google_prominent_added: 0,
+      google_prominent_deduped: 0,
+      google_prominent_ms: null,
+      snapshot_served: false,
+      snapshot_age_minutes: null,
+      google_prefill_matches: 0,
+      yelp_backfill_attempted: 0,
+      yelp_backfill_matched: 0,
+      yelp_backfill_skipped_budget: 0,
+      yelp_backfill_skipped_lookup_cap: 0,
+      yelp_backfill_skipped_time_budget: 0,
+      yelp_backfill_skipped_rate_limit_stop: 0,
+      yelp_backfill_skipped_no_api_key: 0,
+      cache_hit: true,
+      cache_write: false,
+      cache_write_skipped_reason: null,
+      cache_ttl_minutes: null,
+      request_budget_mode: "normal",
+      warning_codes: cachedResponse.warnings.map((warning) => warning.code),
+    });
+    return NextResponse.json(cachedResponse);
+  }
 
   const prominentPromise = fetchGoogleProminentRows(city, {
     resultLimit: GOOGLE_PROMINENT_MAX_RESULTS,
@@ -1180,8 +1860,8 @@ export async function POST(request: Request) {
     .catch(() => ({ result: { restaurants: [], warnings: [] }, finishedAtMs: Date.now() }));
   const prominentStartedAtMs = Date.now();
 
-  const origin = new URL(request.url).origin;
   const isLocal = isLocalOrigin(origin);
+  const profilePolicy = buildSearchProfilePolicy(isLocal, appProfile);
   let yelpResponse: Response | null = null;
   let yelpMs: number | null = null;
   let yelpStatus = "unknown";
@@ -1228,6 +1908,7 @@ export async function POST(request: Request) {
           const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
           return googleOnlyFallback(
             city,
+            appProfile,
             { requestStartedAtMs, yelpStatus, yelpMs },
             prefetchedProminent,
             prefetchedProminentMs,
@@ -1267,6 +1948,7 @@ export async function POST(request: Request) {
         const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
         return googleOnlyFallback(
           city,
+          appProfile,
           { requestStartedAtMs, yelpStatus, yelpMs },
           prefetchedProminent,
           prefetchedProminentMs,
@@ -1306,6 +1988,21 @@ export async function POST(request: Request) {
         google_prominent_added: 0,
         google_prominent_deduped: 0,
         google_prominent_ms: null,
+        snapshot_served: false,
+        snapshot_age_minutes: null,
+        google_prefill_matches: 0,
+        yelp_backfill_attempted: 0,
+        yelp_backfill_matched: 0,
+        yelp_backfill_skipped_budget: 0,
+        yelp_backfill_skipped_lookup_cap: 0,
+        yelp_backfill_skipped_time_budget: 0,
+        yelp_backfill_skipped_rate_limit_stop: 0,
+        yelp_backfill_skipped_no_api_key: 0,
+        cache_hit: false,
+        cache_write: false,
+        cache_write_skipped_reason: null,
+        cache_ttl_minutes: null,
+        request_budget_mode: "degraded",
         warning_codes: [],
       });
       return NextResponse.json(failureEnvelope(city, code, message), { status });
@@ -1316,6 +2013,7 @@ export async function POST(request: Request) {
     const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
     return googleOnlyFallback(
       city,
+      appProfile,
       { requestStartedAtMs, yelpStatus: code, yelpMs },
       prefetchedProminent,
       prefetchedProminentMs,
@@ -1331,6 +2029,7 @@ export async function POST(request: Request) {
     const prefetchedProminentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
     return googleOnlyFallback(
       city,
+      appProfile,
       { requestStartedAtMs, yelpStatus: "zero_results", yelpMs },
       prefetchedProminent,
       prefetchedProminentMs,
@@ -1340,9 +2039,9 @@ export async function POST(request: Request) {
   const prominentOutcome = await prominentPromise;
   const prominent = prominentOutcome.result;
   const prominentMs = prominentOutcome.finishedAtMs - prominentStartedAtMs;
-  applyProminentGoogleMatches(restaurants, prominent.restaurants);
+  const googlePrefillMatches = applyProminentGoogleMatches(restaurants, prominent.restaurants);
 
-  const maxGoogleEnrichments = isLocal ? MAX_GOOGLE_ENRICHMENTS : DEPLOYED_MAX_GOOGLE_ENRICHMENTS;
+  const maxGoogleEnrichments = profilePolicy.maxGoogleEnrichments;
   const targetRestaurants = restaurants
     .filter((restaurant) => !hasGoogleData(restaurant.google))
     .slice(0, maxGoogleEnrichments);
@@ -1430,7 +2129,12 @@ export async function POST(request: Request) {
 
   const scoredRestaurants = shouldComputeCombinedScore() ? computeCombinedScores(restaurantsWithMichelin) : restaurantsWithMichelin;
   const prominentUniqueRows = dedupeProminentAgainstYelp(restaurants, prominent.restaurants);
-  await backfillProminentRowsWithYelpData(city, prominentUniqueRows, isLocal);
+  const yelpBackfillMetrics = await backfillProminentRowsWithYelpData(
+    city,
+    prominentUniqueRows,
+    isLocal,
+    profilePolicy,
+  );
   const prominentRowsWithMichelin = prominentUniqueRows.map((restaurant) => ({
     ...restaurant,
     michelin: matchMichelinForRestaurant({
@@ -1464,6 +2168,23 @@ export async function POST(request: Request) {
       code,
       message: warningMessage(code),
     }));
+  const hasBackfillDegradation =
+    yelpBackfillMetrics.skipped_time_budget > 0 ||
+    yelpBackfillMetrics.skipped_rate_limit_stop > 0 ||
+    yelpBackfillMetrics.skipped_no_api_key > 0;
+  const requestBudgetMode: "normal" | "degraded" =
+    warnings.length > 0 || hasBackfillDegradation ? "degraded" : "normal";
+
+  const response: SearchResponseSuccess = {
+    city,
+    restaurants: toProfileRestaurants(mergedRestaurants),
+    warnings,
+  };
+  const cacheWriteDecision = shouldWriteDynamicCityCache(response, requestBudgetMode);
+  const cacheTtlMinutes = cacheWriteDecision.write
+    ? maybeSetDynamicCityCache(city, appProfile, response) ?? null
+    : null;
+  const cacheDiagnostics = getCacheDiagnostics(cacheWriteDecision.write, cacheWriteDecision.reason, cacheTtlMinutes);
 
   logSearchDiagnostics({
     mode: "yelp_primary",
@@ -1482,14 +2203,20 @@ export async function POST(request: Request) {
     google_prominent_added: prominentAdded,
     google_prominent_deduped: prominentDeduped,
     google_prominent_ms: prominentMs,
+    snapshot_served: false,
+    snapshot_age_minutes: null,
+    google_prefill_matches: googlePrefillMatches,
+    yelp_backfill_attempted: yelpBackfillMetrics.attempted,
+    yelp_backfill_matched: yelpBackfillMetrics.matched,
+    yelp_backfill_skipped_budget: yelpBackfillMetrics.skipped_budget,
+    yelp_backfill_skipped_lookup_cap: yelpBackfillMetrics.skipped_lookup_cap,
+    yelp_backfill_skipped_time_budget: yelpBackfillMetrics.skipped_time_budget,
+    yelp_backfill_skipped_rate_limit_stop: yelpBackfillMetrics.skipped_rate_limit_stop,
+    yelp_backfill_skipped_no_api_key: yelpBackfillMetrics.skipped_no_api_key,
+    request_budget_mode: requestBudgetMode,
     warning_codes: warnings.map((warning) => warning.code),
+    ...cacheDiagnostics,
   });
-
-  const response: SearchResponseSuccess = {
-    city,
-    restaurants: toProfileRestaurants(mergedRestaurants),
-    warnings,
-  };
 
   return NextResponse.json(response);
 }
