@@ -3,7 +3,7 @@
   "base_url": "http://localhost:3001",
   "started_at_utc": "2026-03-28T21:16:49.156Z",
   "finished_at_utc": "2026-03-28T21:32:43.229Z",
-  "total_cities": 30,
+  "total_cities": 32,
   "results": [
     {
       "city": "San Francisco, CA",
@@ -451,6 +451,36 @@
       "google_prominent_added": 4,
       "pct_missing_google_rating": 0,
       "pct_missing_yelp_rating": 5,
+      "warnings": [],
+      "error": null,
+      "attempts": 1
+    },
+    {
+      "city": "Amsterdam, Netherlands",
+      "slug": "amsterdam-netherlands",
+      "success": true,
+      "google_only": false,
+      "duration_ms": 0,
+      "result_count": 80,
+      "yelp_rows": 70,
+      "google_prominent_added": 10,
+      "pct_missing_google_rating": 1.2,
+      "pct_missing_yelp_rating": 12.5,
+      "warnings": [],
+      "error": null,
+      "attempts": 1
+    },
+    {
+      "city": "Honolulu, HI",
+      "slug": "honolulu-hi",
+      "success": true,
+      "google_only": false,
+      "duration_ms": 0,
+      "result_count": 80,
+      "yelp_rows": 79,
+      "google_prominent_added": 1,
+      "pct_missing_google_rating": 0.0,
+      "pct_missing_yelp_rating": 1.2,
       "warnings": [],
       "error": null,
       "attempts": 1
